@@ -154,6 +154,8 @@ impl SessionView {
             if !self.fullscreen {
             egui::TopBottomPanel::top("toolbar").show(ctx, |ui| {
                 ui.horizontal(|ui| {
+                    // first, so a narrow window can't cut it off
+                    self.scale_menu(ui, s.id);
                     let name = s.desktop_name.lock().clone();
                     let route = if s.via_vpn.load(Ordering::Relaxed) { "via VPN" } else { "direct" };
                     let kind = if s.native.load(Ordering::Relaxed) { "PortlessVNC" } else { "standard VNC" };
@@ -207,7 +209,6 @@ impl SessionView {
                             core.hub.note_window.store(!open, Ordering::Relaxed);
                         }
                     }
-                    self.scale_menu(ui, s.id);
                     if ui.button("Full screen").clicked() {
                         self.fullscreen = true;
                         ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(true));

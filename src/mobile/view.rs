@@ -752,6 +752,13 @@ impl RemoteView {
                         core.cfg.write().viewer.orientation = self.orientation;
                         core.save_config();
                     }
+                    // each tap moves to the next size mode
+                    let cur = self.scale_mode.unwrap_or(ScaleMode::KeepRatio);
+                    if ui.add(big(&format!("Size: {}", cur.short_label()))).clicked() {
+                        let i = ScaleMode::ALL.iter().position(|m| *m == cur).unwrap_or(0);
+                        self.scale_mode = Some(ScaleMode::ALL[(i + 1) % ScaleMode::ALL.len()]);
+                        self.zoom = 1.0;
+                    }
                     ui.separator();
                     for (m, label) in [(Mode::Mouse, "Mouse"), (Mode::Keyboard, "Keyboard"), (Mode::View, "View")] {
                         if ui.add(big(label).selected(self.mode == m)).clicked() {

@@ -148,6 +148,18 @@ impl ScaleMode {
         }
     }
 
+    /// For a button on a phone.
+    #[allow(dead_code)] // Android only
+    pub fn short_label(self) -> &'static str {
+        match self {
+            ScaleMode::Stretch => "stretch",
+            ScaleMode::KeepRatio => "fit",
+            ScaleMode::FitWidth => "width",
+            ScaleMode::FitHeight => "height",
+            ScaleMode::Full => "full",
+        }
+    }
+
     /// Horizontal and vertical scale for a `fw` x `fh` remote screen shown in a
     /// `w` x `h` area. `ppp` is the display's physical pixels per UI point.
     pub fn scales(self, w: f32, h: f32, fw: f32, fh: f32, ppp: f32) -> (f32, f32) {
