@@ -329,7 +329,8 @@ impl RemoteView {
 
     fn on_ui(&self, ctx: &egui::Context, p: Pos2) -> bool {
         let in_rect = |r: Option<Rect>| r.map(|r| r.contains(p)).unwrap_or(false);
-        in_rect(self.bar_rect) || in_rect(self.keys_rect) || in_rect(self.mouse_rect) || ctx.layer_id_at(p).map(|l| l.order != egui::Order::Background).unwrap_or(false)
+        // (an open dropdown also keeps the tap that closes it)
+        ctx.memory(|m| m.any_popup_open()) || in_rect(self.bar_rect) || in_rect(self.keys_rect) || in_rect(self.mouse_rect) || ctx.layer_id_at(p).map(|l| l.order != egui::Order::Background).unwrap_or(false)
     }
 
     fn touches(&mut self, ctx: &egui::Context, view: Rect, fw: f32, fh: f32) {
@@ -707,7 +708,7 @@ impl RemoteView {
 
     /// A hardware (Bluetooth/USB) keyboard: its keys arrive as egui events.
     fn hardware_keys(&mut self, ctx: &egui::Context) {
-        if ctx.wants_keyboard_input() || self.mode == Mode::View {
+        if ctx.wants_keyboard_input() || self.mode == Mode::View || self.options_open || ctx.memory(|m| m.any_popup_open()) {
             return;
         }
         let (events, mods) = ctx.input(|i| (i.events.clone(), i.modifiers));

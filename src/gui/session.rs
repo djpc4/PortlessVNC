@@ -33,6 +33,14 @@ pub struct SessionView {
     overlay_rect: Option<egui::Rect>,
     /// audio mode to restore when unmuting
     unmuted_audio: Option<AudioMode>,
+    /// a menu was open this frame / the last one
+    menu_open: bool,
+    menu_prev: bool,
+    /// a menu or dropdown is open: keys stay here
+    input_paused: Arc<std::sync::atomic::AtomicBool>,
+    /// this mouse press began off the remote screen (or closed a menu): the remote
+    /// computer never sees it
+    swallow_press: bool,
 }
 
 
@@ -44,17 +52,22 @@ impl SessionView {
         crate::platform::keyhook::register(&session.title, tx);
         let held: Arc<parking_lot::Mutex<Vec<(u32, u32)>>> = Arc::default();
         let hook_used: Arc<std::sync::atomic::AtomicBool> = Arc::default();
+        let input_paused: Arc<std::sync::atomic::AtomicBool> = Arc::default();
         // Forward hooked keys straight to the network (no GUI frame needed).
         // The loop ends when the session is unregistered from the hook.
         #[cfg(windows)]
         {
-            let (s, held, used) = (session.clone(), held.clone(), hook_used.clone());
+            let (s, held, used, paused) = (session.clone(), held.clone(), hook_used.clone(), input_paused.clone());
             std::thread::Builder::new()
                 .name("key-forward".into())
                 .spawn(move || {
                     for k in rx {
                         if !used.swap(true, Ordering::Relaxed) {
                             log::info!("Keyboard: capturing keys for {} (low-level hook)", s.address);
+                        }
+                        // (releases still go through, so no key is left held down)
+                        if k.down && paused.load(Ordering::Relaxed) {
+                            continue;
                         }
                         {
                             let mut h = held.lock();
@@ -76,6 +89,10 @@ impl SessionView {
             tex: None,
             tex_gen: u64::MAX,
             cursor_tex: None,
+            menu_open: false,
+            menu_prev: false,
+            input_paused,
+            swallow_press: false,
             buttons: 0,
             last_pos: (0, 0),
             scroll_acc: egui::Vec2::ZERO,
@@ -140,6 +157,8 @@ impl SessionView {
         if self.scale_mode.is_none() {
             self.scale_mode = Some(core.cfg.read().viewer.scale());
         }
+        // (the full-screen bar is drawn after the picture, so last frame's answer counts)
+        self.menu_prev = std::mem::take(&mut self.menu_open);
         let s = self.session.clone();
         let vid = egui::ViewportId::from_hash_of(("session", s.id));
         let builder = egui::ViewportBuilder::default().with_title(&s.title).with_inner_size([1280.0, 800.0]).with_min_inner_size([480.0, 320.0]);
@@ -192,7 +211,7 @@ impl SessionView {
                     }
                     let kb = if self.hook_used.load(Ordering::Relaxed) { "hook" } else if self.fallback_logged { "window" } else { "none yet" };
                     ui.label(RichText::new(format!("keys: {kb}")).small().weak()).on_hover_text("How keystrokes are captured: 'hook' = all keys incl. Win/Alt+Tab, 'window' = normal keys via the window");
-                    ui.menu_button("Keys", |ui| {
+                    let keys_menu = ui.menu_button("Keys", |ui| {
                         for (label, combo, hint) in KEY_COMBOS {
                             let b = ui.button(*label);
                             let b = if hint.is_empty() { b } else { b.on_hover_text(*hint) };
@@ -202,6 +221,7 @@ impl SessionView {
                             }
                         }
                     });
+                    self.menu_open |= keys_menu.inner.is_some();
                     let note_unread = core.hub.note_unread();
                     if s.native.load(Ordering::Relaxed) {
                         let open = core.hub.note_window.load(Ordering::Relaxed);
@@ -369,7 +389,7 @@ impl SessionView {
                             }
                         }
                     }
-                    ui.menu_button("Keys", |ui| {
+                    let keys_menu = ui.menu_button("Keys", |ui| {
                         for (label, combo, hint) in KEY_COMBOS {
                             let b = ui.button(*label);
                             let b = if hint.is_empty() { b } else { b.on_hover_text(*hint) };
@@ -379,6 +399,7 @@ impl SessionView {
                             }
                         }
                     });
+                    self.menu_open |= keys_menu.inner.is_some();
                     if s.native.load(Ordering::Relaxed) {
                         let open = core.hub.note_window.load(Ordering::Relaxed);
                         let label = if core.hub.note_unread() { "Shared text \u{25CF}" } else { "Shared text" };
@@ -463,7 +484,10 @@ impl SessionView {
         };
 
         let focused = ctx.input(|i| i.focused);
-        if !focused && !self.held.lock().is_empty() {
+        // a menu or dropdown is open: mouse and keys stay here until it closes
+        let paused = self.menu_open || self.menu_prev || ctx.memory(|m| m.any_popup_open());
+        self.input_paused.store(paused, Ordering::Relaxed);
+        if (paused || !focused) && !self.held.lock().is_empty() {
             self.release_keys();
         }
 
@@ -471,7 +495,7 @@ impl SessionView {
 
 // Fallback keyboard path: egui only sees keys the hook did not capture
         // (hook unavailable, or another app owns the keyboard), so forward them.
-        if focused && !self.hook_used.load(Ordering::Relaxed) {
+        if focused && !paused && !self.hook_used.load(Ordering::Relaxed) {
             let (events, mods) = ctx.input(|i| (i.events.clone(), i.modifiers));
             for (bit, on, keysym, xt) in [
                 (0, mods.shift, 0xffe1u32, 0x2au32),
@@ -510,7 +534,7 @@ impl SessionView {
         }
 
         // pointer
-        let (pos, b, scroll) = ctx.input(|i| {
+        let (pos, mut b, scroll) = ctx.input(|i| {
             let mut b = 0u8;
             if i.pointer.button_down(egui::PointerButton::Primary) {
                 b |= 1;
@@ -525,7 +549,17 @@ impl SessionView {
         });
         let over_overlay = matches!((pos, self.overlay_rect), (Some(p), Some(r)) if r.contains(p));
         // (inside the picture and not on a scroll bar or scrolled out of view)
-        let inside = pos.map(|p| rect.contains(p) && visible.contains(p)).unwrap_or(false) && !over_overlay;
+        // anything drawn on top of the picture (a menu, the shared text window) keeps its clicks
+        let covered = pos.is_some_and(|p| ctx.layer_id_at(p).is_some_and(|l| l != ui.layer_id()));
+        let inside = pos.map(|p| rect.contains(p) && visible.contains(p)).unwrap_or(false) && !over_overlay && !covered && !paused;
+        if b == 0 {
+            self.swallow_press = false;
+        } else if self.buttons == 0 && !inside {
+            self.swallow_press = true;
+        }
+        if self.swallow_press {
+            b = 0;
+        }
         if let Some(p) = pos {
             if inside || self.buttons != 0 {
                 let x = (((p.x - rect.min.x) / sx).clamp(0.0, fw - 1.0)) as u16;
