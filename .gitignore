@@ -1,0 +1,18 @@
+# build output (binaries go on the Releases page, not in the repository)
+/target/
+/dist/
+*.apk
+*.exe
+
+# never commit secrets or personal settings
+*.ovpn
+*.conf
+*.jks
+*.keystore
+*.pass
+*.pem
+*.der
+*.key
+config.json
+crash*.txt
+.secret-key

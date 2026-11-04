@@ -1,0 +1,127 @@
+﻿[package]
+name = "portless-vnc"
+version = "0.2.5"
+edition = "2021"
+description = "Hybrid VNC server + viewer with a built-in userspace OpenVPN client for port-forward-free remote access"
+license = "BSD-2-Clause"
+
+[[bin]]
+name = "PortlessVNC"
+path = "src/main.rs"
+
+# Android client (an empty library on other platforms)
+[lib]
+name = "portlessvnc"
+path = "src/android.rs"
+crate-type = ["cdylib"]
+
+[dependencies]
+# GUI
+eframe = { version = "0.29.1", features = ["wgpu"] }
+
+# Async runtime (VPN tunnel + netstack)
+tokio = { version = "1.40", features = ["rt-multi-thread", "net", "time", "sync", "macros", "io-util"] }
+
+# TLS / crypto
+rustls = { version = "0.23.13", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+rustls-pemfile = "2.1"
+rustls-pki-types = "1.8"
+webpki = { package = "rustls-webpki", version = "0.103", default-features = false, features = ["std", "ring"] }
+rcgen = { version = "0.13.1", default-features = false, features = ["ring", "pem"] }
+sha1 = "0.10"
+sha2 = "0.10"
+md-5 = "0.10"
+hmac = "0.12"
+aes = "0.8"
+cbc = { version = "0.1", features = ["std"] }
+ctr = "0.9"
+cipher = "0.4"
+aes-gcm = "0.10"
+chacha20poly1305 = "0.10"
+des = "0.8"
+rand = "0.8"
+
+# Userspace TCP/IP stack for the VPN (no TUN/TAP driver needed)
+smoltcp = { version = "0.12", default-features = false, features = ["std", "log", "medium-ip", "proto-ipv4", "socket-tcp", "socket-tcp-cubic", "socket-icmp"] }
+
+# Video / audio codecs
+flate2 = "1.0"
+jpeg-encoder = "0.6"
+zune-jpeg = "0.4"
+cpal = "0.15"
+opus = "0.3"
+
+# Misc
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+base64 = "0.22"
+hex = "0.4"
+crossbeam-channel = "0.5"
+parking_lot = "0.12"
+log = "0.4"
+env_logger = "0.11"
+anyhow = "1"
+dirs = "5"
+if-addrs = "0.13"
+socket2 = "0.6"
+
+[target.'cfg(not(target_os = "android"))'.dependencies]
+rfd = "0.15"
+
+[target.'cfg(target_os = "android")'.dependencies]
+eframe = { version = "0.29.1", features = ["wgpu", "android-native-activity"] }
+android-activity = { version = "0.6", features = ["native-activity"] }
+winit = { version = "0.30", default-features = false, features = ["android-native-activity", "rwh_06"] }
+jni = "0.21"
+ndk-context = "0.1"
+android_logger = "0.14"
+libc = "0.2"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+x11rb = { version = "0.13", features = ["shm", "xtest", "xfixes", "randr"] }
+libc = "0.2"
+arboard = { version = "3.4", default-features = false }
+ksni = { version = "0.3", default-features = false, features = ["blocking", "async-io"] }
+
+[target.'cfg(windows)'.dependencies]
+windows-service = "0.7"
+
+[target.'cfg(windows)'.dependencies.windows]
+version = "0.58"
+features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
+    "Win32_Graphics_Direct3D",
+    "Win32_Graphics_Direct3D11",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_Shell",
+    "Win32_System_DataExchange",
+    "Win32_System_Memory",
+    "Win32_System_Ole",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Registry",
+    "Win32_System_Threading",
+    "Win32_Security",
+    "Win32_Security_Cryptography",
+    "Win32_System_RemoteDesktop",
+    "Win32_System_StationsAndDesktops",
+    "Win32_System_SystemServices",
+]
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 4
+strip = true
+panic = "unwind"
+
+# Keep codecs/crypto fast even in debug builds
+[profile.dev.package."*"]
+opt-level = 2
+
+# Android: winit with Back passed on to the activity (see vendor/winit, one line)
+[patch.crates-io]
+winit = { path = "vendor/winit" }
