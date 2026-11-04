@@ -98,6 +98,23 @@ fn encode_saved(pass: &str) -> Option<String> {
     crate::platform::protect_for_config(pass.as_bytes()).map(|b| base64::engine::general_purpose::STANDARD.encode(b))
 }
 
+/// The text, shortened with "..." if it's wider than `width`.
+fn fit_text(ui: &egui::Ui, text: &str, font: &egui::FontId, width: f32) -> String {
+    let wide = |s: &str| ui.fonts(|f| f.layout_no_wrap(s.to_string(), font.clone(), Color32::WHITE).size().x) > width;
+    if !wide(text) {
+        return text.to_string();
+    }
+    let mut kept: Vec<char> = text.chars().collect();
+    while !kept.is_empty() {
+        kept.pop();
+        let s: String = kept.iter().collect::<String>() + "...";
+        if !wide(&s) {
+            return s;
+        }
+    }
+    "...".into()
+}
+
 fn vpn_label(v: &ClientVpn, known: bool) -> String {
     match v {
         ClientVpn::Unset => "Decide by address (older entry)".into(),
@@ -319,8 +336,8 @@ impl App {
         info
     }
 
-    /// "address @ VPN server", for the shortcut's tooltip.
-    fn client_detail(&mut self, e: &BookEntry) -> String {
+    /// "address @ VPN server"
+    fn client_at(&mut self, e: &BookEntry) -> String {
         let at = match e.vpn() {
             ClientVpn::Unset => "decided by address".to_string(),
             ClientVpn::None => "no VPN".to_string(),
@@ -330,7 +347,7 @@ impl App {
                 None => format!("{n} (VPN missing)"),
             },
         };
-        format!("{} @ {at}\nDouble-click to connect, right-click for settings", e.address)
+        format!("{} @ {at}", e.address)
     }
 
     fn group_title(&self, g: &ClientVpn) -> String {
@@ -411,7 +428,7 @@ impl App {
         }
         groups.push(ClientVpn::None);
         groups.push(ClientVpn::Unset);
-        let details: Vec<String> = book.iter().map(|e| self.client_detail(e)).collect();
+        let details: Vec<String> = book.iter().map(|e| self.client_at(e)).collect();
         let titles: Vec<String> = groups.iter().map(|g| self.group_title(g)).collect();
 
         let mut connect = None;
@@ -432,7 +449,22 @@ impl App {
                             if e.vpn() != *g {
                                 continue;
                             }
-                            let r = ui.add_sized([132.0, 48.0], egui::Button::new(RichText::new(&e.name).strong()).wrap()).on_hover_text(&details[i]);
+                            // guest clients also show which VPN they're on
+                            let r = if matches!(e.vpn(), ClientVpn::Guest(_)) {
+                                let r = ui.add_sized([150.0, 48.0], egui::Button::new(""));
+                                let name_font = egui::TextStyle::Button.resolve(ui.style());
+                                let small_font = egui::TextStyle::Small.resolve(ui.style());
+                                let width = r.rect.width() - 10.0;
+                                let c = r.rect.center();
+                                let painter = ui.painter();
+                                let text = ui.style().interact(&r).text_color();
+                                painter.text(c - egui::vec2(0.0, 9.0), egui::Align2::CENTER_CENTER, fit_text(ui, &e.name, &name_font, width), name_font, text);
+                                painter.text(c + egui::vec2(0.0, 10.0), egui::Align2::CENTER_CENTER, fit_text(ui, &details[i], &small_font, width), small_font, ui.visuals().weak_text_color());
+                                r
+                            } else {
+                                ui.add_sized([150.0, 48.0], egui::Button::new(RichText::new(&e.name).strong()).wrap())
+                            };
+                            let r = r.on_hover_text(format!("{}\nDouble-click to connect, right-click for settings", details[i]));
                             if r.double_clicked() {
                                 connect = Some(i);
                             }
