@@ -68,6 +68,13 @@ change the service's VPN profile/login from that card.
 * **Keyboard**: normal typing is sent while the session window is focused; a
   **Keys** menu sends Ctrl+Alt+Del, Ctrl+Shift+Esc, Alt+Tab, Alt+F4, Win
   combos and PrintScreen.
+* **Screen size**, changeable while connected: fit to window keeping the shape,
+  fit to window stretched, fit width, fit height, or full size (one remote pixel
+  per screen pixel). The modes that don't fit scroll; in them the mouse wheel goes
+  to the remote computer and the scroll bars move your view. Settings holds the
+  default.
+* **Menus stay local**: while a session menu or dropdown is open, and for half a
+  second after it closes, mouse and keys are not sent to the remote computer.
 * **Shared text**: a pop-out window both sides can type/paste into (a fallback
   for the clipboard, or a quick chat). Opens by itself when the other side
   writes.
@@ -116,7 +123,7 @@ heading shows this phone's VPN address, for firewall rules); tap one to bring up
 its VPN and connect. **New connection** / **Edit** open a setup page per computer:
 address, optional saved password, VPN profile (import `.ovpn`, login saved per
 profile), sound, quality, touch style, rotation, nickname. Nothing connects at
-start. In a session a tab at the top offers Rotate, Mouse / Keyboard / View,
+start. In a session a tab at the top offers Rotate, Size, Mouse / Keyboard / View,
 Mute and More (key combos, quality, shared text, disconnect); a Left/Right
 mouse-button bar can be hidden; Back disconnects. Sound is off by default.
 
