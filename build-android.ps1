@@ -31,6 +31,12 @@ set(ANDROID_PLATFORM android-$api)
 include("$($ndk -replace '\\','/')/build/cmake/android.toolchain.cmake")
 "@
 $env:CMAKE_TOOLCHAIN_FILE_aarch64_linux_android = $tcfile
+# keep this machine's paths (user name) out of the C and C++ libraries too
+$map = "-ffile-prefix-map=$(($env:USERPROFILE) -replace '\\','/')=~ -ffile-prefix-map=$env:USERPROFILE=~"
+$env:CFLAGS_aarch64_linux_android = $map
+$env:CXXFLAGS_aarch64_linux_android = $map
+$env:CFLAGS = $map
+$env:CXXFLAGS = $map
 $env:CMAKE_GENERATOR = "Ninja"
 $env:CMAKE_POLICY_VERSION_MINIMUM = "3.5"
 if (-not $env:CARGO_TARGET_DIR) { $env:CARGO_TARGET_DIR = Join-Path $env:USERPROFILE "pvnc-target" }

@@ -8,7 +8,7 @@ rights, nothing to install: one file.
 | Platform | What |
 |----------|------|
 | Windows 10/11 (x64) | Server + viewer, optional background service with tray icon |
-| Windows 7 / 8 / 8.1 (x64) | Same program, built for Windows 7 (`-win7.exe`); draws with OpenGL, captures the screen with GDI |
+| Windows 7 / 8 / 8.1 (x64) | Same program, built for Windows 7 (`-win7.exe`); works even on very old graphics (below) |
 | Linux x86_64, X11 (Ubuntu 20.04+ / Debian 11+ / Mint 20+) | Server + viewer, optional root service with tray icon |
 | Android 8+ (arm64) | Viewer only: saved computers grouped by VPN, touch controls |
 
@@ -59,7 +59,7 @@ change the service's VPN profile/login from that card.
   monitors"), tile-based change detection, Tight (JPEG/palette/zlib), ZRLE,
   Hextile, Raw. Local cursor rendering. Quality: Auto (adapts to the link),
   High, Medium, Low, Lossless.
-* **Audio** (host -> viewer): system output via WASAPI loopback, Opus at 20 ms
+* **Audio** (host -> viewer): system output via WASAPI loopback (polled on Windows before 10), Opus at 20 ms
   frames. Off / Auto (adapts to the link) / 32 / 64 / 96 / 128 kbps, per viewer.
 * **Clipboard**: text both ways. Files: copy in Explorer on one side, paste in
   Explorer on the other (downloaded when you paste). Plus "Send files..." in
@@ -112,6 +112,22 @@ The optional root service follows the active X display (including the login
 screen) and has a tray icon (StatusNotifier: Cinnamon, KDE, XFCE, MATE; GNOME
 needs the AppIndicator extension).
 
+## Old graphics
+
+The window normally draws through Direct3D 12, Vulkan or OpenGL. On a machine with
+none of those and OpenGL below 2.0 (Intel 945 and similar) it automatically draws
+with the CPU instead, at up to about 30 frames per second. A session then fills the
+main window rather than opening its own; disconnect to return. Start with
+`--software-render` to force this mode anywhere.
+
+## Antivirus warnings
+
+The programs are not code-signed, and remote-control tools inject input and hook the
+keyboard, so security software may flag them: an earlier Windows 7 build was flagged by
+Windows Defender's machine-learning detection (`Bearfoos.A!ml`). Only download from this
+repository's Releases page, or build from source. False positives can be reported at
+https://www.microsoft.com/wdsi/filesubmission.
+
 ## Known limits
 
 * Without the service, Windows blocks control of UAC prompts, the sign-in
@@ -123,10 +139,11 @@ needs the AppIndicator extension).
 ## Command line
 
 ```
-PortlessVNC.exe [--minimized] [--host-only] [--connect ADDRESS]
+PortlessVNC.exe [--minimized] [--host-only] [--connect ADDRESS] [--software-render]
 PortlessVNC.exe --selftest                      # loopback end-to-end test
 PortlessVNC.exe --vpntest profile.ovpn          # VPN test (PVNC_VPN_USER/PVNC_VPN_PASS)
 PortlessVNC.exe --vpnpair profile.ovpn          # two instances on the VPN, A views B
+PortlessVNC.exe --remote ADDRESS out.bmp [ops]  # troubleshooting: drive a VNC server (see tools/remote.ps1)
 ```
 
 Addresses: `host` (port 5900), `host:1` (display 1 = 5901), `host::5901` (port).

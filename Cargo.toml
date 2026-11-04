@@ -1,6 +1,6 @@
 [package]
 name = "portless-vnc"
-version = "0.2.5"
+version = "0.2.6"
 edition = "2021"
 description = "Hybrid VNC server + viewer with a built-in userspace OpenVPN client for port-forward-free remote access"
 license = "BSD-2-Clause"
