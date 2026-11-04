@@ -869,7 +869,7 @@ impl MobileApp {
             });
             Self::card(ui, "DEFAULTS FOR NEW CONNECTIONS", |ui| {
                 let mut c = self.core.cfg.read().viewer.clone();
-                let before = (c.audio, c.quality, c.touch_direct, c.orientation, c.share_clipboard);
+                let before = (c.audio, c.quality, c.touch_direct, c.orientation, c.share_clipboard, c.scale());
                 ui.label("Sound (uses data):");
                 egui::ComboBox::from_id_salt("set-audio").selected_text(c.audio.label()).show_ui(ui, |ui| {
                     for m in AudioMode::PRESETS {
@@ -882,6 +882,15 @@ impl MobileApp {
                         ui.selectable_value(&mut c.quality, m, m.label());
                     }
                 });
+                ui.label("Remote screen size:");
+                let cur = c.scale();
+                egui::ComboBox::from_id_salt("set-scale").selected_text(cur.label()).show_ui(ui, |ui| {
+                    for m in crate::config::ScaleMode::ALL {
+                        if ui.selectable_label(cur == m, m.label()).clicked() {
+                            c.set_scale(m);
+                        }
+                    }
+                });
                 ui.label("Touch:");
                 ui.radio_value(&mut c.touch_direct, false, "Touchpad - drag moves the pointer");
                 ui.radio_value(&mut c.touch_direct, true, "Direct - tap where you click");
@@ -892,7 +901,7 @@ impl MobileApp {
                     }
                 });
                 ui.checkbox(&mut c.share_clipboard, "Share the clipboard (text)");
-                if (c.audio, c.quality, c.touch_direct, c.orientation, c.share_clipboard) != before {
+                if (c.audio, c.quality, c.touch_direct, c.orientation, c.share_clipboard, c.scale()) != before {
                     self.core.cfg.write().viewer = c;
                     self.core.save_config();
                 }

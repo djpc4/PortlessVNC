@@ -1,7 +1,7 @@
 ﻿//! One viewer session window (a native OS window via an egui viewport).
 
 use crate::app::Core;
-use crate::config::{AudioMode, QualityMode};
+use crate::config::{AudioMode, QualityMode, ScaleMode};
 use crate::viewer::{Answer, Session, State};
 use crate::keys::{egui_keysym, to_color_image, KEY_COMBOS};
 use eframe::egui::{self, Color32, RichText, TextureHandle, TextureOptions};
@@ -20,7 +20,8 @@ pub struct SessionView {
     held: Arc<parking_lot::Mutex<Vec<(u32, u32)>>>,
     user: String,
     pass: String,
-    scale_to_fit: Option<bool>,
+    /// This window's size mode (starts from the setting)
+    scale_mode: Option<ScaleMode>,
     registered: bool,
     egui_mods: u8,
     fallback_logged: bool,
@@ -81,7 +82,7 @@ impl SessionView {
             held,
             user: String::new(),
             pass: String::new(),
-            scale_to_fit: None,
+            scale_mode: None,
             registered: true,
             egui_mods: 0,
             fallback_logged: false,
@@ -122,8 +123,23 @@ impl SessionView {
         }
     }
 
+    /// The window's size menu (the toolbar and the full-screen bar).
+    fn scale_menu(&mut self, ui: &mut egui::Ui, id: u64) {
+        let cur = self.scale_mode.unwrap_or(ScaleMode::KeepRatio);
+        egui::ComboBox::from_id_salt(("scale", id)).selected_text(cur.label()).width(180.0).show_ui(ui, |ui| {
+            for m in ScaleMode::ALL {
+                if ui.selectable_label(cur == m, m.label()).clicked() {
+                    self.scale_mode = Some(m);
+                }
+            }
+        });
+    }
+
     /// Returns false when the window has been closed.
     pub fn show(&mut self, ctx: &egui::Context, core: &Arc<Core>) -> bool {
+        if self.scale_mode.is_none() {
+            self.scale_mode = Some(core.cfg.read().viewer.scale());
+        }
         let s = self.session.clone();
         let vid = egui::ViewportId::from_hash_of(("session", s.id));
         let builder = egui::ViewportBuilder::default().with_title(&s.title).with_inner_size([1280.0, 800.0]).with_min_inner_size([480.0, 320.0]);
@@ -191,8 +207,7 @@ impl SessionView {
                             core.hub.note_window.store(!open, Ordering::Relaxed);
                         }
                     }
-                    let fit = self.scale_to_fit.get_or_insert(core.cfg.read().viewer.scale_to_fit);
-                    ui.toggle_value(fit, "Fit");
+                    self.scale_menu(ui, s.id);
                     if ui.button("Full screen").clicked() {
                         self.fullscreen = true;
                         ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(true));
@@ -341,6 +356,7 @@ impl SessionView {
                         self.overlay_open = false;
                         ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(false));
                     }
+                    self.scale_menu(ui, s.id);
                     if s.native.load(Ordering::Relaxed) {
                         let muted = *s.audio.lock() == AudioMode::Off;
                         if ui.button(if muted { "Unmute" } else { "Mute" }).clicked() {
@@ -399,25 +415,50 @@ impl SessionView {
             (sz[0] as f32, sz[1] as f32)
         };
         let avail = ui.available_rect_before_wrap();
-        let fit = self.scale_to_fit.unwrap_or(true);
-        let scale = if fit { (avail.width() / fw).min(avail.height() / fh).min(1.0).max(0.05) } else { 1.0 };
-        let size = egui::vec2(fw * scale, fh * scale);
+        let mode = self.scale_mode.unwrap_or(ScaleMode::KeepRatio);
+        let ppp = ctx.pixels_per_point();
+        // scroll bars here take up room rather than float over the picture, so a
+        // click on one can never reach the remote computer
+        ui.spacing_mut().scroll = egui::style::ScrollStyle::solid();
+        let bar = ui.spacing().scroll.allocated_width();
+        let (sx, sy) = match mode {
+            // leave room for the one scroll bar if this mode will need it
+            ScaleMode::FitWidth if fh * avail.width() / fw > avail.height() => mode.scales(avail.width() - bar, avail.height(), fw, fh, ppp),
+            ScaleMode::FitHeight if fw * avail.height() / fh > avail.width() => mode.scales(avail.width(), avail.height() - bar, fw, fh, ppp),
+            _ => mode.scales(avail.width(), avail.height(), fw, fh, ppp),
+        };
+        let size = egui::vec2(fw * sx, fh * sy);
 
-        let mut draw = |ui: &mut egui::Ui| -> (egui::Response, egui::Rect) {
-            let (rect, resp) = if fit {
-                let rect = egui::Rect::from_center_size(avail.center(), size);
-                let resp = ui.allocate_rect(rect, egui::Sense::click_and_drag());
-                (rect, resp)
-            } else {
-                ui.allocate_exact_size(size, egui::Sense::click_and_drag())
-            };
+        let draw = |ui: &mut egui::Ui| -> (egui::Response, egui::Rect) {
+            // centred on any side where the picture is smaller than the window
+            let outer = size.max(ui.available_size());
+            let (area, resp) = ui.allocate_exact_size(outer, egui::Sense::click_and_drag());
+            let rect = egui::Rect::from_center_size(area.center(), size);
             ui.painter().image(tex.id(), rect, egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)), Color32::WHITE);
             (resp, rect)
         };
-        let (resp, rect) = if fit {
-            draw(ui)
-        } else {
-            egui::ScrollArea::both().auto_shrink([false, false]).show(ui, |ui| draw(ui)).inner
+        // the wheel belongs to the remote computer: the bars move the view here
+        if matches!(mode, ScaleMode::FitWidth | ScaleMode::FitHeight | ScaleMode::Full) {
+            let over = ctx.input(|i| i.pointer.hover_pos()).is_some_and(|p| avail.contains(p));
+            let over_ui = ctx.memory(|m| m.any_popup_open());
+            if over && !over_ui {
+                ctx.input_mut(|i| i.smooth_scroll_delta = egui::Vec2::ZERO);
+            }
+        }
+        let ((resp, rect), visible) = {
+            let area = match mode {
+                ScaleMode::FitWidth => Some(egui::ScrollArea::vertical()),
+                ScaleMode::FitHeight => Some(egui::ScrollArea::horizontal()),
+                ScaleMode::Full => Some(egui::ScrollArea::both()),
+                _ => None,
+            };
+            match area {
+                Some(a) => {
+                    let out = a.auto_shrink([false, false]).drag_to_scroll(false).show(ui, |ui| draw(ui));
+                    (out.inner, out.inner_rect)
+                }
+                None => (draw(ui), avail),
+            }
         };
 
         let focused = ctx.input(|i| i.focused);
@@ -482,11 +523,12 @@ impl SessionView {
             (i.pointer.hover_pos(), b, i.raw_scroll_delta)
         });
         let over_overlay = matches!((pos, self.overlay_rect), (Some(p), Some(r)) if r.contains(p));
-        let inside = pos.map(|p| rect.contains(p)).unwrap_or(false) && !over_overlay;
+        // (inside the picture and not on a scroll bar or scrolled out of view)
+        let inside = pos.map(|p| rect.contains(p) && visible.contains(p)).unwrap_or(false) && !over_overlay;
         if let Some(p) = pos {
             if inside || self.buttons != 0 {
-                let x = (((p.x - rect.min.x) / scale).clamp(0.0, fw - 1.0)) as u16;
-                let y = (((p.y - rect.min.y) / scale).clamp(0.0, fh - 1.0)) as u16;
+                let x = (((p.x - rect.min.x) / sx).clamp(0.0, fw - 1.0)) as u16;
+                let y = (((p.y - rect.min.y) / sy).clamp(0.0, fh - 1.0)) as u16;
                 let buttons = if inside || b == 0 { b } else { self.buttons & b };
                 if (x, y) != self.last_pos || buttons != self.buttons {
                     s.pointer(x, y, buttons);
@@ -534,8 +576,9 @@ impl SessionView {
             }
             if let (Some((t, _, (hx, hy))), Some(p), true) = (&self.cursor_tex, pos, inside) {
                 ctx.set_cursor_icon(egui::CursorIcon::None);
-                let sz = t.size_vec2() * scale.max(0.5);
-                let min = p - egui::vec2(*hx as f32, *hy as f32) * scale.max(0.5);
+                let cs = egui::vec2(sx.max(0.5), sy.max(0.5));
+                let sz = t.size_vec2() * cs;
+                let min = p - egui::vec2(*hx as f32, *hy as f32) * cs;
                 ui.painter().image(t.id(), egui::Rect::from_min_size(min, sz), egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)), Color32::WHITE);
             }
         }

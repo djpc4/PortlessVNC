@@ -1205,7 +1205,17 @@ impl App {
                         }
                     });
                 });
-                ui.checkbox(&mut draft.viewer.scale_to_fit, "Scale remote screen to fit the window");
+                ui.horizontal(|ui| {
+                    ui.label("Remote screen size:");
+                    let cur = draft.viewer.scale();
+                    egui::ComboBox::from_id_salt("scale2").selected_text(cur.label()).show_ui(ui, |ui| {
+                        for m in crate::config::ScaleMode::ALL {
+                            if ui.selectable_label(cur == m, m.label()).clicked() {
+                                draft.viewer.set_scale(m);
+                            }
+                        }
+                    });
+                });
                 ui.checkbox(&mut draft.viewer.share_clipboard, "Share clipboard with remote computers");
                 ui.checkbox(&mut draft.viewer.capture_system_keys, "Send Windows key / Alt+Tab to the remote computer");
                 ui.separator();

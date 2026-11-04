@@ -120,12 +120,61 @@ impl Default for ServerConfig {
     }
 }
 
+/// How the remote screen is sized in the viewer.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ScaleMode {
+    /// Fills the window; the picture may be stretched.
+    Stretch,
+    /// The whole screen fits, shape kept.
+    KeepRatio,
+    /// Window width filled, shape kept; scrolls up and down if taller.
+    FitWidth,
+    /// Window height filled, shape kept; scrolls sideways if wider.
+    FitHeight,
+    /// One remote pixel per screen pixel; scrolls both ways if larger.
+    Full,
+}
+
+impl ScaleMode {
+    pub const ALL: [ScaleMode; 5] = [ScaleMode::KeepRatio, ScaleMode::Stretch, ScaleMode::FitWidth, ScaleMode::FitHeight, ScaleMode::Full];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            ScaleMode::Stretch => "Fit to window (stretch)",
+            ScaleMode::KeepRatio => "Fit to window (keep ratio)",
+            ScaleMode::FitWidth => "Fit width (keep ratio)",
+            ScaleMode::FitHeight => "Fit height (keep ratio)",
+            ScaleMode::Full => "Full size (scroll)",
+        }
+    }
+
+    /// Horizontal and vertical scale for a `fw` x `fh` remote screen shown in a
+    /// `w` x `h` area. `ppp` is the display's physical pixels per UI point.
+    pub fn scales(self, w: f32, h: f32, fw: f32, fh: f32, ppp: f32) -> (f32, f32) {
+        if fw <= 0.0 || fh <= 0.0 {
+            return (1.0, 1.0);
+        }
+        let (sx, sy) = (w / fw, h / fh);
+        let (x, y) = match self {
+            ScaleMode::Stretch => (sx, sy),
+            ScaleMode::KeepRatio => (sx.min(sy), sx.min(sy)),
+            ScaleMode::FitWidth => (sx, sx),
+            ScaleMode::FitHeight => (sy, sy),
+            ScaleMode::Full => (1.0 / ppp.max(0.1), 1.0 / ppp.max(0.1)),
+        };
+        (x.max(0.05), y.max(0.05))
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(default)]
 pub struct ViewerConfig {
     pub quality: QualityMode,
     pub audio: AudioMode,
+    /// Older setting, still written so older versions keep working: see `scale_mode`.
     pub scale_to_fit: bool,
+    /// None: not chosen yet, follow `scale_to_fit`.
+    pub scale_mode: Option<ScaleMode>,
     pub share_clipboard: bool,
     pub capture_system_keys: bool,
     /// Android: tap where you touch (else the screen is a touchpad)
@@ -138,7 +187,18 @@ pub struct ViewerConfig {
 
 impl Default for ViewerConfig {
     fn default() -> Self {
-        ViewerConfig { quality: QualityMode::Auto, audio: AudioMode::Auto, scale_to_fit: true, share_clipboard: true, capture_system_keys: true, touch_direct: false, orientation: 0, mouse_bar: true }
+        ViewerConfig { quality: QualityMode::Auto, audio: AudioMode::Auto, scale_to_fit: true, scale_mode: None, share_clipboard: true, capture_system_keys: true, touch_direct: false, orientation: 0, mouse_bar: true }
+    }
+}
+
+impl ViewerConfig {
+    pub fn scale(&self) -> ScaleMode {
+        self.scale_mode.unwrap_or(if self.scale_to_fit { ScaleMode::KeepRatio } else { ScaleMode::Full })
+    }
+
+    pub fn set_scale(&mut self, m: ScaleMode) {
+        self.scale_mode = Some(m);
+        self.scale_to_fit = m != ScaleMode::Full;
     }
 }
 
@@ -354,6 +414,35 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn scale_modes_size_the_picture() {
+        // a 2000 x 1000 remote screen in a 1000 x 1000 area
+        let s = |m: ScaleMode| m.scales(1000.0, 1000.0, 2000.0, 1000.0, 1.0);
+        assert_eq!(s(ScaleMode::Stretch), (0.5, 1.0));
+        assert_eq!(s(ScaleMode::KeepRatio), (0.5, 0.5));
+        assert_eq!(s(ScaleMode::FitWidth), (0.5, 0.5));
+        assert_eq!(s(ScaleMode::FitHeight), (1.0, 1.0));
+        assert_eq!(s(ScaleMode::Full), (1.0, 1.0));
+        // a small remote screen grows to fit
+        assert_eq!(ScaleMode::KeepRatio.scales(1000.0, 1000.0, 500.0, 500.0, 1.0), (2.0, 2.0));
+        // full size means real pixels on a scaled display
+        assert_eq!(ScaleMode::Full.scales(1000.0, 1000.0, 500.0, 500.0, 2.0), (0.5, 0.5));
+    }
+
+    #[test]
+    fn older_fit_setting_carries_over_and_stays_written() {
+        let old: ViewerConfig = serde_json::from_str(r#"{"scale_to_fit":false}"#).unwrap();
+        assert_eq!(old.scale(), ScaleMode::Full);
+        let old: ViewerConfig = serde_json::from_str(r#"{"scale_to_fit":true}"#).unwrap();
+        assert_eq!(old.scale(), ScaleMode::KeepRatio);
+        let mut c = ViewerConfig::default();
+        c.set_scale(ScaleMode::Full);
+        assert!(!c.scale_to_fit);
+        c.set_scale(ScaleMode::Stretch);
+        assert!(c.scale_to_fit);
+        assert_eq!(c.scale(), ScaleMode::Stretch);
+    }
 
     fn temp_dir(tag: &str) -> PathBuf {
         let d = std::env::temp_dir().join(format!("pvnc-config-test-{tag}-{}", std::process::id()));

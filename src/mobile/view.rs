@@ -8,7 +8,7 @@
 //! fingers pan (when zoomed in) or scroll.
 
 use crate::app::Core;
-use crate::config::{AudioMode, QualityMode};
+use crate::config::{AudioMode, QualityMode, ScaleMode};
 use crate::keys::{char_keysym, egui_keysym, needs_shift, to_color_image, KEY_COMBOS, SHIFT};
 use crate::platform::java;
 use crate::viewer::{Answer, Session, State};
@@ -68,7 +68,11 @@ pub struct RemoteView {
     frame: u64,
     tex_gen: u64,
     cursor_tex: Option<(TextureHandle, u64, (usize, usize))>,
-    /// 1.0 = whole screen fits
+    /// How the screen is sized before zooming (starts from the setting)
+    scale_mode: Option<ScaleMode>,
+    /// physical pixels per UI point
+    ppp: f32,
+    /// 1.0 = the size mode's own size
     zoom: f32,
     /// remote point shown at the centre of the phone screen
     center: Pos2,
@@ -144,6 +148,8 @@ impl RemoteView {
             frame: 0,
             tex_gen: u64::MAX,
             cursor_tex: None,
+            scale_mode: None,
+            ppp: 1.0,
             zoom: 1.0,
             center: Pos2::ZERO,
             centered: false,
@@ -251,29 +257,30 @@ impl RemoteView {
 
     // ---- geometry -----------------------------------------------------------
 
-    fn scale(&self, view: Rect, fw: f32, fh: f32) -> f32 {
-        (view.width() / fw).min(view.height() / fh) * self.zoom
+    fn scale(&self, view: Rect, fw: f32, fh: f32) -> Vec2 {
+        let (sx, sy) = self.scale_mode.unwrap_or(ScaleMode::KeepRatio).scales(view.width(), view.height(), fw, fh, self.ppp);
+        vec2(sx, sy) * self.zoom
     }
 
-    fn to_screen(&self, view: Rect, scale: f32, p: Pos2) -> Pos2 {
+    fn to_screen(&self, view: Rect, scale: Vec2, p: Pos2) -> Pos2 {
         view.center() + (p - self.center) * scale
     }
 
-    fn to_remote(&self, view: Rect, scale: f32, s: Pos2) -> Pos2 {
+    fn to_remote(&self, view: Rect, scale: Vec2, s: Pos2) -> Pos2 {
         self.center + (s - view.center()) / scale
     }
 
-    fn clamp_center(&mut self, view: Rect, scale: f32, fw: f32, fh: f32) {
-        let hw = view.width() / (2.0 * scale);
-        let hh = view.height() / (2.0 * scale);
+    fn clamp_center(&mut self, view: Rect, scale: Vec2, fw: f32, fh: f32) {
+        let hw = view.width() / (2.0 * scale.x);
+        let hh = view.height() / (2.0 * scale.y);
         self.center.x = if fw <= 2.0 * hw { fw / 2.0 } else { self.center.x.clamp(hw, fw - hw) };
         self.center.y = if fh <= 2.0 * hh { fh / 2.0 } else { self.center.y.clamp(hh, fh - hh) };
     }
 
     /// Touchpad mode: keep the pointer on screen.
-    fn follow_cursor(&mut self, view: Rect, scale: f32) {
-        let hw = view.width() / (2.0 * scale) * 0.85;
-        let hh = view.height() / (2.0 * scale) * 0.85;
+    fn follow_cursor(&mut self, view: Rect, scale: Vec2) {
+        let hw = view.width() / (2.0 * scale.x) * 0.85;
+        let hh = view.height() / (2.0 * scale.y) * 0.85;
         let d = self.cursor - self.center;
         if d.x > hw {
             self.center.x = self.cursor.x - hw;
@@ -418,7 +425,9 @@ impl RemoteView {
                                 self.zoom_at(view, fw, fh, c, d / t.last_dist);
                             }
                             let scale = self.scale(view, fw, fh);
-                            if t.zooming || view_only || (self.direct && self.zoom > 1.01) {
+                            // two fingers pan whenever part of the screen is out of view
+                            let overflow = fw * scale.x > view.width() + 1.0 || fh * scale.y > view.height() + 1.0;
+                            if t.zooming || view_only || (self.direct && overflow) {
                                 self.center -= moved / scale; // pan with the fingers
                             } else {
                                 self.scroll_acc += moved.y;
@@ -546,6 +555,9 @@ impl RemoteView {
     }
 
     pub fn show(&mut self, ctx: &egui::Context, core: &Arc<Core>) -> Outcome {
+        if self.scale_mode.is_none() {
+            self.scale_mode = Some(core.cfg.read().viewer.scale());
+        }
         let s = self.session.clone();
         self.upload(ctx);
         let state = s.state.lock().clone();
@@ -657,6 +669,7 @@ impl RemoteView {
         let [w, h] = tex.size();
         let (fw, fh) = (w as f32, h as f32);
         self.fb_size = (fw, fh);
+        self.ppp = ctx.pixels_per_point();
         if !self.centered {
             self.center = pos2(fw / 2.0, fh / 2.0);
             self.cursor = self.center;
@@ -671,7 +684,7 @@ impl RemoteView {
         // the pointer, drawn locally so it never lags
         let at = self.to_screen(view, scale, self.cursor);
         let cur = self.session.cursor.lock().clone();
-        let cs = scale.clamp(0.8, 2.5);
+        let cs = scale.x.min(scale.y).clamp(0.8, 2.5);
         match cur {
             Some((c, gen)) if c.width > 0 && c.height > 0 => {
                 if self.cursor_tex.as_ref().map(|t| t.1) != Some(gen) {
@@ -815,7 +828,17 @@ impl RemoteView {
                         core.cfg.write().viewer.touch_direct = self.direct;
                         core.save_config();
                     }
-                    if ui.add_enabled(self.zoom > 1.0, egui::Button::new("Fit the whole screen")).clicked() {
+                    ui.label(RichText::new("Screen size").strong());
+                    let cur = self.scale_mode.unwrap_or(ScaleMode::KeepRatio);
+                    egui::ComboBox::from_id_salt(("scale", s.id)).selected_text(cur.label()).show_ui(ui, |ui| {
+                        for m in ScaleMode::ALL {
+                            if ui.selectable_label(cur == m, m.label()).clicked() {
+                                self.scale_mode = Some(m);
+                                self.zoom = 1.0;
+                            }
+                        }
+                    });
+                    if ui.add_enabled(self.zoom > 1.0, egui::Button::new("Undo zoom")).clicked() {
                         self.zoom = 1.0;
                     }
                     ui.separator();
