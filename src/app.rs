@@ -7,6 +7,7 @@ use crate::server::Server;
 use crate::viewer::Session;
 use crate::vpn::VpnManager;
 use parking_lot::{Mutex, RwLock};
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -18,6 +19,8 @@ pub struct Core {
     pub server: Arc<Server>,
     pub vpn: Arc<VpnManager>,
     pub sessions: Mutex<Vec<Arc<Session>>>,
+    /// Guest VPNs (by profile name), separate from the home VPN above.
+    pub guests: Mutex<HashMap<String, Arc<VpnManager>>>,
 }
 
 impl Core {
@@ -34,7 +37,13 @@ impl Core {
         let identity = crate::tls::load_or_create_identity(&dir)?;
         let server = Server::new(cfg.clone(), hub.clone(), audio.clone(), identity)?;
         let vpn = VpnManager::new(cfg.clone(), server.clone());
-        Ok(Arc::new(Core { dir, cfg, hub, audio, server, vpn, sessions: Mutex::new(Vec::new()) }))
+        Ok(Arc::new(Core { dir, cfg, hub, audio, server, vpn, sessions: Mutex::new(Vec::new()), guests: Mutex::new(HashMap::new()) }))
+    }
+
+    /// The connection for a guest VPN (it starts disconnected).
+    #[allow(dead_code)] // desktop window only
+    pub fn guest_vpn(&self, name: &str) -> Arc<VpnManager> {
+        self.guests.lock().entry(name.to_string()).or_insert_with(|| VpnManager::new_guest(self.cfg.clone(), self.server.clone())).clone()
     }
 
     pub fn save_config(&self) {

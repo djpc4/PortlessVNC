@@ -157,6 +157,9 @@ pub struct VpnProfile {
 pub struct VpnConfig {
     pub profiles: Vec<VpnProfile>,
     pub selected: usize,
+    /// The profile flagged as this computer's home VPN (name). The background
+    /// service has its own profile setting and does not use this.
+    pub home: Option<String>,
     pub connect_on_start: bool,
     /// Reconnect forever (with backoff) once a profile has worked.
     pub keep_connected: bool,
@@ -166,7 +169,7 @@ pub struct VpnConfig {
 
 impl Default for VpnConfig {
     fn default() -> Self {
-        VpnConfig { profiles: Vec::new(), selected: 0, connect_on_start: false, keep_connected: true, resume: false }
+        VpnConfig { profiles: Vec::new(), selected: 0, home: None, connect_on_start: false, keep_connected: true, resume: false }
     }
 }
 
@@ -180,6 +183,10 @@ pub struct BookEntry {
     pub password_protected: Option<String>,
     /// VPN profile (name) used to reach it; None = same network
     pub vpn_profile: Option<String>,
+    /// desktop: the VPN choice below was made (entries from older versions have none)
+    pub vpn_assigned: bool,
+    /// desktop: reached through the home VPN
+    pub vpn_home: bool,
     /// this computer's own viewer settings (None = the app's defaults)
     pub audio: Option<AudioMode>,
     pub quality: Option<QualityMode>,
@@ -187,9 +194,50 @@ pub struct BookEntry {
     pub orientation: Option<u8>,
 }
 
+/// How a saved client is reached.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ClientVpn {
+    /// Saved by an older version: decided by address, as it was then.
+    Unset,
+    /// Local, or needs no VPN: always connects directly.
+    None,
+    /// Uses the home VPN that is already up (the service's or this window's).
+    Home,
+    /// Uses this known VPN, connected only while one of its clients is open.
+    Guest(String),
+}
+
+impl BookEntry {
+    pub fn vpn(&self) -> ClientVpn {
+        if !self.vpn_assigned {
+            ClientVpn::Unset
+        } else if self.vpn_home {
+            ClientVpn::Home
+        } else {
+            match &self.vpn_profile {
+                Some(n) => ClientVpn::Guest(n.clone()),
+                None => ClientVpn::None,
+            }
+        }
+    }
+
+    pub fn set_vpn(&mut self, v: ClientVpn) {
+        self.vpn_assigned = v != ClientVpn::Unset;
+        self.vpn_home = v == ClientVpn::Home;
+        self.vpn_profile = match v {
+            ClientVpn::Guest(n) => Some(n),
+            _ => None,
+        };
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(default)]
 pub struct Config {
+    /// Settings format; older files are copied aside before being changed.
+    /// (0 when absent: not the struct's default, or old files would look current)
+    #[serde(default)]
+    pub config_version: u32,
     pub server: ServerConfig,
     pub viewer: ViewerConfig,
     pub download_dir: String,
@@ -206,6 +254,7 @@ impl Default for Config {
     fn default() -> Self {
         let dl = dirs::download_dir().unwrap_or_else(|| PathBuf::from(".")).join("PortlessVNC");
         Config {
+            config_version: CONFIG_VERSION,
             server: ServerConfig::default(),
             viewer: ViewerConfig::default(),
             download_dir: dl.to_string_lossy().into_owned(),
@@ -218,6 +267,9 @@ impl Default for Config {
         }
     }
 }
+
+/// 1 = 0.3.0 (client VPN assignments)
+const CONFIG_VERSION: u32 = 1;
 
 static MACHINE_MODE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
@@ -257,6 +309,18 @@ impl Config {
     pub fn load(dir: &Path) -> Config {
         let path = dir.join("config.json");
         let mut cfg: Config = std::fs::read_to_string(&path).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
+        if cfg.config_version < CONFIG_VERSION {
+            // keep the older settings, in case the older version is wanted back
+            let backup = dir.join("config.pre-0.3.json");
+            if path.exists() && !backup.exists() {
+                if let Err(e) = std::fs::copy(&path, &backup) {
+                    log::warn!("Could not back up the older settings: {e}");
+                }
+            }
+            // the profile in use so far becomes the home VPN
+            cfg.vpn.home = cfg.vpn.profiles.get(cfg.vpn.selected).map(|p| p.name.clone());
+            cfg.config_version = CONFIG_VERSION;
+        }
         if cfg.server.vnc_password.is_empty() {
             // First run: generate a random 8-character password.
             let pw = crate::util::random_password(8);
@@ -284,5 +348,65 @@ impl Config {
         self.recent.retain(|a| a != addr);
         self.recent.insert(0, addr.to_string());
         self.recent.truncate(15);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_dir(tag: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("pvnc-config-test-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    const OLD_SETTINGS: &str = r#"{
+        "vpn": { "profiles": [
+            { "name": "first", "ovpn_path": "a.ovpn", "username": "", "password_protected": null },
+            { "name": "second", "ovpn_path": "b.ovpn", "username": "", "password_protected": null }
+        ], "selected": 1 },
+        "address_book": [ { "name": "Office", "address": "10.8.0.6", "username": "", "password_protected": null } ],
+        "known_hosts": { "10.8.0.6:5900": "abc" }
+    }"#;
+
+    #[test]
+    fn older_settings_are_backed_up_and_keep_working() {
+        let d = temp_dir("old");
+        std::fs::write(d.join("config.json"), OLD_SETTINGS).unwrap();
+        let c = Config::load(&d);
+        // a copy of the older file, byte for byte
+        assert_eq!(std::fs::read_to_string(d.join("config.pre-0.3.json")).unwrap(), OLD_SETTINGS);
+        // the profile in use becomes home
+        assert_eq!(c.vpn.home.as_deref(), Some("second"));
+        // older clients keep being decided by address, and their trust carries over
+        assert_eq!(c.address_book[0].vpn(), ClientVpn::Unset);
+        assert_eq!(c.known_hosts.get("10.8.0.6:5900").map(|s| s.as_str()), Some("abc"));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn current_settings_are_not_migrated_again() {
+        let d = temp_dir("new");
+        let mut c = Config::default();
+        c.vpn.profiles.push(VpnProfile { name: "guest".into(), ..Default::default() });
+        c.vpn.home = None; // the flag was removed on purpose
+        c.save(&d).unwrap();
+        let again = Config::load(&d);
+        assert_eq!(again.vpn.home, None);
+        assert!(!d.join("config.pre-0.3.json").exists());
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn client_vpn_choices_survive_saving() {
+        for v in [ClientVpn::None, ClientVpn::Home, ClientVpn::Guest("Dave".into())] {
+            let mut e = BookEntry::default();
+            e.set_vpn(v.clone());
+            let s = serde_json::to_string(&e).unwrap();
+            let back: BookEntry = serde_json::from_str(&s).unwrap();
+            assert_eq!(back.vpn(), v);
+        }
     }
 }

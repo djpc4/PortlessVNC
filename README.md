@@ -71,9 +71,25 @@ change the service's VPN profile/login from that card.
 * **Shared text**: a pop-out window both sides can type/paste into (a fallback
   for the clipboard, or a quick chat). Opens by itself when the other side
   writes.
-* **Address box**: grey autocomplete, Tab accepts. Without a dot it offers
-  recent/address-book entries; after a dot it offers the VPN network prefix,
-  then the LAN one (e.g. `10.8.0.x`).
+* **Address box**: for one-off connections, with grey autocomplete (Tab
+  accepts). Without a dot it offers recent/saved entries; after a dot it offers
+  the VPN network prefix, then the LAN one (e.g. `10.8.0.x`).
+* **Computers** (desktop): saved clients as nicknamed shortcuts, grouped by the
+  VPN they use. Double-click connects; right-click opens its settings. "+ Add
+  client" can also connect once without saving anything. Each client is
+  assigned one of:
+  * **No VPN**: connects directly, never through a tunnel.
+  * **Home VPN**: uses the home VPN that is already up. With the background
+    service running that is the service's VPN, reached through a relay only
+    this computer can use; update the service to 0.3.0 for this.
+  * **A guest VPN**: connected when needed and closed after its last client.
+    Outbound only: the VNC server does not listen on it and no local port is
+    forwarded to it, whatever the host settings say.
+* **Known VPNs**: the list of `.ovpn` profiles and their logins. Guest profiles
+  are copied into the app's settings folder. **Set as home** flags the home VPN
+  and can be changed at any time; the service keeps its own profile setting.
+  Removing a VPN leaves its clients marked "VPN missing": they will not connect
+  until given another, rather than falling back to a direct connection.
 * **Auth**: a **one-time password** (on by default, TeamViewer/RustDesk style:
   shown next to the VPN address, works for one login, then changes), plus an
   optional permanent VNC password (8 chars max, like every VNC server), or

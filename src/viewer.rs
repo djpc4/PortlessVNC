@@ -66,8 +66,25 @@ pub fn parse_address(s: &str) -> Option<Target> {
     }
 }
 
+/// How a session reaches its server.
+#[derive(Clone)]
+#[allow(dead_code)] // the Android client only uses Auto
+pub enum Route {
+    /// Decide by address: the VPN if it covers it, else directly (typed addresses).
+    Auto,
+    /// Never through a tunnel.
+    Direct,
+    /// Only through this tunnel.
+    Tunnel(Arc<crate::vpn::VpnManager>),
+    /// Only through the background service's VPN.
+    ServiceRelay,
+}
+
 pub struct Session {
     pub id: u64,
+    pub route: Route,
+    /// The guest VPN this session belongs to.
+    pub guest: Option<String>,
     pub title: String,
     pub address: String,
     pub state: Mutex<State>,
@@ -108,12 +125,20 @@ impl Session {
 
     /// Like start, with this connection's own picture quality and sound.
     pub fn start_with(core: Arc<Core>, address: &str, username: &str, password: &str, q: QualityMode, a: AudioMode) -> Arc<Session> {
+        Self::start_routed(core, address, username, password, q, a, Route::Auto, None)
+    }
+
+    /// Like start_with, for a saved client: reached only the way it was assigned.
+    #[allow(clippy::too_many_arguments)]
+    pub fn start_routed(core: Arc<Core>, address: &str, username: &str, password: &str, q: QualityMode, a: AudioMode, route: Route, guest: Option<String>) -> Arc<Session> {
         let id = crate::hub::new_peer_id();
         let (prio_tx, prio_rx) = unbounded();
         let (bulk_tx, bulk_rx) = bounded(16);
         let (answer_tx, answer_rx) = unbounded();
         let s = Arc::new(Session {
             id,
+            route,
+            guest,
             title: format!("{address} - PortlessVNC #{id}"),
             address: address.to_string(),
             state: Mutex::new(State::Connecting("Connecting...".into())),
@@ -217,10 +242,24 @@ impl Session {
         let addrs: Vec<SocketAddr> = (t.host.as_str(), t.port).to_socket_addrs()?.collect();
         let mut last = io::Error::new(io::ErrorKind::NotFound, "host not found");
         for a in addrs {
-            if self.core.vpn.routes_to(a.ip()) {
+            let tunnel = match &self.route {
+                Route::Auto if self.core.vpn.routes_to(a.ip()) => Some(self.core.vpn.clone()),
+                Route::Tunnel(vpn) => Some(vpn.clone()),
+                _ => None,
+            };
+            if let Some(vpn) = tunnel {
                 self.via_vpn.store(true, Ordering::Relaxed);
                 self.set_state(State::Connecting(format!("Connecting to {a} through the VPN tunnel...")));
-                match self.core.vpn.dial(a, Duration::from_secs(10)) {
+                match vpn.dial(a, Duration::from_secs(10)) {
+                    Ok(s) => return Ok(s),
+                    Err(e) => last = e,
+                }
+                continue;
+            }
+            if matches!(self.route, Route::ServiceRelay) {
+                self.via_vpn.store(true, Ordering::Relaxed);
+                self.set_state(State::Connecting(format!("Connecting to {a} through the service's VPN...")));
+                match crate::vpn::relay::dial(a, Duration::from_secs(12)) {
                     Ok(s) => return Ok(s),
                     Err(e) => last = e,
                 }
@@ -237,7 +276,11 @@ impl Session {
 
     fn run(self: &Arc<Self>) -> io::Result<()> {
         let target = parse_address(&self.address).ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "Invalid address"))?;
-        let host_key = format!("{}:{}", target.host, target.port);
+        // different guest VPNs can use the same addresses for different computers
+        let host_key = match &self.guest {
+            Some(g) => format!("guest/{g}/{}:{}", target.host, target.port),
+            None => format!("{}:{}", target.host, target.port),
+        };
         let mut tcp = self.dial(&target)?;
         let _ = tcp.set_nodelay(true);
         let _ = tcp.set_read_timeout(Some(Duration::from_secs(180)));
@@ -385,7 +428,10 @@ impl Session {
         log::info!("Connected to {} ({name}, {w}x{h})", self.address);
         {
             let mut c = self.core.cfg.write();
-            c.add_recent(&self.address);
+            // saved clients have their own way there; a recent address would lose it
+            if matches!(self.route, Route::Auto) {
+                c.add_recent(&self.address);
+            }
         }
         self.core.save_config();
         let peer: Arc<dyn Peer> = self.clone();

@@ -11,6 +11,7 @@ pub mod crypto;
 pub mod engine;
 pub mod netstack;
 pub mod ovpn;
+pub mod relay;
 
 use crate::config::Config;
 use crate::server::Server;
@@ -57,6 +58,22 @@ impl Default for VpnStatus {
     }
 }
 
+/// The port the VNC server listens on inside a tunnel: never on a guest VPN.
+fn inbound_port(guest: bool, server_enabled: bool, port: u16) -> Option<u16> {
+    (server_enabled && !guest).then_some(port)
+}
+
+#[cfg(test)]
+mod inbound_tests {
+    #[test]
+    fn a_guest_vpn_never_listens() {
+        assert_eq!(super::inbound_port(true, true, 5900), None);
+        assert_eq!(super::inbound_port(true, false, 5900), None);
+        assert_eq!(super::inbound_port(false, true, 5900), Some(5900));
+        assert_eq!(super::inbound_port(false, false, 5900), None);
+    }
+}
+
 pub struct ConnectRequest {
     pub profile_name: String,
     pub config: OvpnConfig,
@@ -73,6 +90,8 @@ pub struct VpnManager {
     rt: tokio::runtime::Runtime,
     cfg: Arc<RwLock<Config>>,
     server: Arc<Server>,
+    /// Outbound only: nothing on this computer can be reached through this VPN.
+    guest: bool,
     pub status: Arc<Mutex<VpnStatus>>,
     net: Arc<Mutex<Option<NetHandle>>>,
     stop: Mutex<Option<(Arc<Notify>, Arc<AtomicBool>)>>,
@@ -81,8 +100,18 @@ pub struct VpnManager {
 
 impl VpnManager {
     pub fn new(cfg: Arc<RwLock<Config>>, server: Arc<Server>) -> Arc<VpnManager> {
+        Self::build(cfg, server, false)
+    }
+
+    /// A guest VPN: only for connecting out to its clients. The VNC server does
+    /// not listen on it and no local port is forwarded, whatever the settings say.
+    pub fn new_guest(cfg: Arc<RwLock<Config>>, server: Arc<Server>) -> Arc<VpnManager> {
+        Self::build(cfg, server, true)
+    }
+
+    fn build(cfg: Arc<RwLock<Config>>, server: Arc<Server>, guest: bool) -> Arc<VpnManager> {
         let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().thread_name("vpn").build().expect("tokio runtime");
-        Arc::new(VpnManager { rt, cfg, server, status: Arc::new(Mutex::new(VpnStatus::default())), net: Arc::new(Mutex::new(None)), stop: Mutex::new(None), pending: Mutex::new(Pending { challenge: None, req: None }) })
+        Arc::new(VpnManager { rt, cfg, server, guest, status: Arc::new(Mutex::new(VpnStatus::default())), net: Arc::new(Mutex::new(None)), stop: Mutex::new(None), pending: Mutex::new(Pending { challenge: None, req: None }) })
     }
 
     pub fn status(&self) -> VpnStatus {
@@ -317,7 +346,7 @@ impl VpnManager {
                             let c = self.server.cfg.read();
                             (c.server.enabled, c.server.port)
                         };
-                        let nc = NetConfig { ip, prefix: info.prefix, gateway: info.gateway.unwrap_or(ip), mtu: (info.mtu as usize).min(1400).max(576), listen_port: enabled.then_some(port) };
+                        let nc = NetConfig { ip, prefix: info.prefix, gateway: info.gateway.unwrap_or(ip), mtu: (info.mtu as usize).min(1400).max(576), listen_port: inbound_port(self.guest, enabled, port), outbound_only: self.guest };
                         let h = netstack::start(nc, ip_out_tx.clone(), self.server.clone());
                         net = Some(h.clone());
                         *self.net.lock() = Some(h);

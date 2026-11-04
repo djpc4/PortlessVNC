@@ -134,6 +134,7 @@ impl Form {
             quality: Some(self.quality),
             touch_direct: Some(self.touch_direct),
             orientation: Some(self.orientation),
+            ..Default::default()
         }
     }
 }

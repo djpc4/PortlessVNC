@@ -163,6 +163,8 @@ pub struct NetConfig {
     pub gateway: Ipv4Addr,
     pub mtu: usize,
     pub listen_port: Option<u16>,
+    /// Guest VPN: never accept anything inbound (also overrides vpn_expose_all).
+    pub outbound_only: bool,
 }
 
 /// Start the stack; returns the handle and keeps running until the tunnel
@@ -235,7 +237,7 @@ async fn run(nc: NetConfig, ip_out: mpsc::Sender<Vec<u8>>, mut ip_in: mpsc::Rece
                 }
                 listeners.remove(i);
                 let is_vnc = Some(port) == nc.listen_port;
-                let expose = server.cfg.read().server.vpn_expose_all;
+                let expose = !nc.outbound_only && server.cfg.read().server.vpn_expose_all;
                 if is_vnc || expose {
                     if let Some(nh) = add_listener(&mut sockets, port) {
                         listeners.push((nh, port));
@@ -412,7 +414,7 @@ async fn run(nc: NetConfig, ip_out: mpsc::Sender<Vec<u8>>, mut ip_in: mpsc::Rece
                     while let Ok(p) = ip_in.try_recv() {
                         batch.push(p);
                     }
-                    let expose = server.cfg.read().server.vpn_expose_all;
+                    let expose = !nc.outbound_only && server.cfg.read().server.vpn_expose_all;
                     for p in batch {
                         // opt-in "other services": open a listener on demand for
                         // the port a peer is connecting to (smoltcp has no wildcard listen)

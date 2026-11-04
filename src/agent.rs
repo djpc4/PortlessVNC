@@ -22,6 +22,7 @@ struct Agent {
     session_password: Option<String>,
     /// mtime of the config as last written by us (outside changes restart the agent)
     mtime: Option<SystemTime>,
+    relay_port: u16,
 }
 
 impl Agent {
@@ -197,6 +198,7 @@ impl Agent {
             vpn_needs_login: ovpn.as_ref().map(|o| o.auth_user_pass && o.auth_file_creds.is_none()).unwrap_or(false),
             vpn_static_challenge: ovpn.and_then(|o| o.static_challenge),
             vpn_off: !cfg.vpn.resume,
+            relay_port: self.relay_port,
             ..Default::default()
         }
     }
@@ -216,7 +218,8 @@ pub fn run() -> i32 {
     core.server.restart();
     log::info!("PortlessVNC agent {} running (service mode)", env!("CARGO_PKG_VERSION"));
 
-    let mut agent = Agent { core, session_password: None, mtime: config_mtime() };
+    let relay_port = crate::vpn::relay::start(core.vpn.clone());
+    let mut agent = Agent { core, session_password: None, mtime: config_mtime(), relay_port };
     // connect at start unless the user switched the VPN off
     if agent.core.cfg.read().vpn.resume {
         agent.connect(None);

@@ -80,6 +80,8 @@ pub struct Status {
     pub vpn_static_challenge: Option<(String, bool)>,
     /// the user pressed Disconnect (stays off until Connect)
     pub vpn_off: bool,
+    /// loopback port for the window to use the service's VPN (0 = none: older service)
+    pub relay_port: u16,
 }
 
 /// "Login..." from the user's window.

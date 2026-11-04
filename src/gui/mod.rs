@@ -1,11 +1,12 @@
 //! Main window: host panel (addresses, password, viewers) + connect panel.
 
+mod clients;
 mod session;
 #[cfg(windows)]
 pub mod soft;
 
 use crate::app::Core;
-use crate::config::{AudioMode, AuthMode, BookEntry, Config, QualityMode, VpnProfile};
+use crate::config::{AudioMode, AuthMode, Config, QualityMode, VpnProfile};
 use crate::hub::{Direction, XferState};
 use crate::vpn::{ovpn::OvpnConfig, ConnectRequest, VpnState};
 use eframe::egui::{self, Color32, RichText};
@@ -28,6 +29,8 @@ struct VpnPrompt {
     challenge: Option<(String, bool)>,
     /// the login is for the background service (sent to it, not used here)
     for_service: bool,
+    /// the login is for this guest VPN (not the window's own VPN)
+    guest: Option<String>,
 }
 
 pub struct App {
@@ -46,7 +49,7 @@ pub struct App {
     ips_at: Instant,
     public_ip: Arc<Mutex<Option<String>>>,
     toast: Option<(String, Instant)>,
-    book_name: String,
+    clients: clients::ClientsUi,
     show_log: bool,
     minimize_once: bool,
     /// this window edits the background service's settings (--service-config)
@@ -87,7 +90,7 @@ impl App {
             ips_at: Instant::now(),
             public_ip,
             toast: None,
-            book_name: String::new(),
+            clients: Default::default(),
             show_log: false,
             minimize_once: minimized,
             service_config,
@@ -162,6 +165,20 @@ impl App {
             self.toast("Import an .ovpn profile first");
             return;
         };
+        if self.guest_vpn_up(&prof.name) {
+            self.toast(format!("'{}' is connected for a client: close that client first", prof.name));
+            return;
+        }
+        let vpn = self.core.vpn.clone();
+        self.vpn_start(vpn, None, idx, prof, force_prompt);
+    }
+
+    fn guest_vpn_up(&self, name: &str) -> bool {
+        self.core.guests.lock().get(name).is_some_and(|v| matches!(v.status().state, VpnState::Connected | VpnState::Connecting(_) | VpnState::Reconnecting(_)))
+    }
+
+    /// Bring up a profile on this connection, asking for a login if it must.
+    fn vpn_start(&mut self, vpn: Arc<crate::vpn::VpnManager>, guest: Option<String>, idx: usize, prof: VpnProfile, force_prompt: bool) {
         let cfg = match OvpnConfig::load(std::path::Path::new(&prof.ovpn_path)) {
             Ok(c) => c,
             Err(e) => {
@@ -179,12 +196,12 @@ impl App {
         }
         let force_prompt = force_prompt || self.service_config;
         if !cfg.auth_user_pass {
-            self.core.vpn.connect(ConnectRequest { profile_name: prof.name.clone(), config: cfg, username: None, password: None });
+            vpn.connect(ConnectRequest { profile_name: prof.name.clone(), config: cfg, username: None, password: None });
             return;
         }
         if let Some((u, p)) = cfg.auth_file_creds.clone() {
             if !force_prompt && cfg.static_challenge.is_none() {
-                self.core.vpn.connect(ConnectRequest { profile_name: prof.name.clone(), config: cfg, username: Some(u), password: Some(p) });
+                vpn.connect(ConnectRequest { profile_name: prof.name.clone(), config: cfg, username: Some(u), password: Some(p) });
                 return;
             }
         }
@@ -194,7 +211,7 @@ impl App {
             String::from_utf8(crate::platform::unprotect(&raw)?).ok()
         });
         if let (false, Some(p), None) = (force_prompt, saved.clone(), cfg.static_challenge.as_ref()) {
-            self.core.vpn.connect(ConnectRequest { profile_name: prof.name.clone(), config: cfg, username: Some(prof.username.clone()), password: Some(p) });
+            vpn.connect(ConnectRequest { profile_name: prof.name.clone(), config: cfg, username: Some(prof.username.clone()), password: Some(p) });
             return;
         }
         self.vpn_prompt = Some(VpnPrompt {
@@ -207,6 +224,7 @@ impl App {
             message: String::new(),
             challenge: None,
             for_service: false,
+            guest,
         });
     }
 
@@ -222,8 +240,12 @@ impl App {
             }
             return;
         }
+        let vpn = match &p.guest {
+            Some(g) => self.core.guest_vpn(g),
+            None => self.core.vpn.clone(),
+        };
         if p.challenge.is_some() {
-            self.core.vpn.answer_challenge(&p.otp);
+            vpn.answer_challenge(&p.otp);
             return;
         }
         let prof = self.core.cfg.read().vpn.profiles.get(p.profile).cloned();
@@ -259,7 +281,7 @@ impl App {
         } else {
             p.pass
         };
-        self.core.vpn.connect(ConnectRequest { profile_name: prof.name, config: cfg, username: Some(p.user), password: Some(password) });
+        vpn.connect(ConnectRequest { profile_name: prof.name, config: cfg, username: Some(p.user), password: Some(password) });
     }
 
     fn import_profile(&mut self) {
@@ -280,6 +302,10 @@ impl App {
                 c.vpn.profiles.retain(|p| p.ovpn_path != path.to_string_lossy());
                 c.vpn.profiles.push(VpnProfile { name: name.clone(), ovpn_path: path.to_string_lossy().into_owned(), username: cfg.auth_file_creds.clone().map(|c| c.0).unwrap_or_default(), password_protected: None });
                 c.vpn.selected = c.vpn.profiles.len() - 1;
+                // imported on the VPN card: the first one is the home VPN until changed
+                if c.vpn.home.is_none() && !self.service_config {
+                    c.vpn.home = Some(name.clone());
+                }
                 drop(c);
                 self.core.save_config();
                 let r = cfg.remotes.first().map(|r| format!("{}:{} {:?}", r.host, r.port, r.proto)).unwrap_or_default();
@@ -407,7 +433,7 @@ impl App {
                     ui.label(format!("The VPN server asks: {text}"));
                     if self.vpn_prompt.is_none() {
                         let idx = self.core.cfg.read().vpn.selected;
-                        self.vpn_prompt = Some(VpnPrompt { profile: idx, user: String::new(), pass: String::new(), otp: String::new(), remember: false, static_challenge: None, message: text.clone(), challenge: Some((text.clone(), *echo)), for_service: false });
+                        self.vpn_prompt = Some(VpnPrompt { profile: idx, user: String::new(), pass: String::new(), otp: String::new(), remember: false, static_challenge: None, message: text.clone(), challenge: Some((text.clone(), *echo)), for_service: false, guest: None });
                     }
                 }
                 _ => {
@@ -453,6 +479,10 @@ impl App {
                         c.vpn.profiles.remove(i);
                     }
                     c.vpn.selected = 0;
+                    let home_gone = c.vpn.home.as_ref().is_some_and(|h| !c.vpn.profiles.iter().any(|p| p.name == *h));
+                    if home_gone {
+                        c.vpn.home = None;
+                    }
                     drop(c);
                     self.core.save_config();
                 }
@@ -753,7 +783,7 @@ impl App {
                 (None, "challenge") => {
                     ui.label(format!("The VPN server asks: {}", st.vpn_detail));
                     if self.vpn_prompt.is_none() {
-                        self.vpn_prompt = Some(VpnPrompt { profile: st.vpn_selected, user: String::new(), pass: String::new(), otp: String::new(), remember: false, static_challenge: None, message: String::new(), challenge: Some((st.vpn_detail.clone(), false)), for_service: true });
+                        self.vpn_prompt = Some(VpnPrompt { profile: st.vpn_selected, user: String::new(), pass: String::new(), otp: String::new(), remember: false, static_challenge: None, message: String::new(), challenge: Some((st.vpn_detail.clone(), false)), for_service: true, guest: None });
                     }
                 }
                 _ => {
@@ -815,6 +845,7 @@ impl App {
                         message: String::new(),
                         challenge: None,
                         for_service: true,
+                        guest: None,
                     });
                 }
                 if active && ui.small_button("Reconnect").clicked() {
@@ -997,11 +1028,11 @@ impl App {
             ui.label(RichText::new(format!("Addresses in your VPN network (like {ip}) are reached through the tunnel automatically.")).small().weak());
         }
         ui.add_space(8.0);
-        ui.columns(2, |cols| {
-            // recent
-            cols[0].label(RichText::new("Recent").strong());
+        self.clients_section(ui);
+        ui.add_space(6.0);
+        egui::CollapsingHeader::new(RichText::new("Recent").small().strong()).id_salt("recent-group").show(ui, |ui| {
             let recent = self.core.cfg.read().recent.clone();
-            egui::ScrollArea::vertical().id_salt("recent").max_height(180.0).show(&mut cols[0], |ui| {
+            egui::ScrollArea::vertical().id_salt("recent").max_height(120.0).show(ui, |ui| {
                 if recent.is_empty() {
                     ui.label(RichText::new("No recent connections").small().weak());
                 }
@@ -1015,44 +1046,6 @@ impl App {
                     }
                 }
             });
-            // address book
-            cols[1].label(RichText::new("Address book").strong());
-            let book = self.core.cfg.read().address_book.clone();
-            let mut remove = None;
-            let mut connect = None;
-            egui::ScrollArea::vertical().id_salt("book").max_height(150.0).show(&mut cols[1], |ui| {
-                if book.is_empty() {
-                    ui.label(RichText::new("Save addresses you use often").small().weak());
-                }
-                for (i, e) in book.iter().enumerate() {
-                    ui.horizontal(|ui| {
-                        if ui.link(&e.name).on_hover_text(&e.address).clicked() {
-                            connect = Some(e.clone());
-                        }
-                        ui.label(RichText::new(&e.address).small().monospace().weak());
-                        if ui.small_button("x").clicked() {
-                            remove = Some(i);
-                        }
-                    });
-                }
-            });
-            cols[1].horizontal(|ui| {
-                ui.add(egui::TextEdit::singleline(&mut self.book_name).hint_text("name").desired_width(110.0));
-                if ui.small_button("Save current address").clicked() && !self.address.trim().is_empty() {
-                    let name = if self.book_name.trim().is_empty() { self.address.clone() } else { self.book_name.trim().to_string() };
-                    self.core.cfg.write().address_book.push(BookEntry { name, address: self.address.trim().to_string(), ..Default::default() });
-                    self.core.save_config();
-                    self.book_name.clear();
-                }
-            });
-            if let Some(i) = remove {
-                self.core.cfg.write().address_book.remove(i);
-                self.core.save_config();
-            }
-            if let Some(e) = connect {
-                self.address = e.address.clone();
-                self.connect_to(&e.address, &e.username, "");
-            }
         });
         ui.add_space(8.0);
         self.transfers(ui);
@@ -1276,6 +1269,7 @@ impl App {
                 draft.vpn.resume = cur.vpn.resume;
                 draft.vpn.profiles = cur.vpn.profiles.clone();
                 draft.vpn.selected = cur.vpn.selected;
+                draft.vpn.home = cur.vpn.home.clone();
                 draft.recent = cur.recent.clone();
                 draft.address_book = cur.address_book.clone();
                 draft.known_hosts = cur.known_hosts.clone();
@@ -1444,7 +1438,9 @@ impl App {
         if submit {
             self.submit_vpn_prompt();
         } else if cancel {
-            self.vpn_prompt = None;
+            if let Some(g) = self.vpn_prompt.take().and_then(|p| p.guest) {
+                self.cancel_guest_wait(&g);
+            }
         }
     }
 }
@@ -1480,6 +1476,7 @@ impl App {
                 log::info!("{}", if running { "The PortlessVNC service is hosting this computer" } else { "The PortlessVNC service stopped; this window hosts again" });
             }
         }
+        self.tick_clients();
         // remember that the VPN is up, so it resumes after a restart
         if self.core.vpn.status().state == VpnState::Connected && !self.core.cfg.read().vpn.resume {
             self.core.cfg.write().vpn.resume = true;
@@ -1597,6 +1594,7 @@ impl App {
         }
 
         self.settings_window(ctx);
+        self.clients_windows(ctx);
         self.vpn_prompt_window(ctx);
         self.shared_text_window(ctx);
 
@@ -1613,6 +1611,7 @@ impl App {
             s.session.close();
         }
         self.core.vpn.disconnect();
+        self.close_guests();
         self.core.server.disconnect_all();
     }
 }
