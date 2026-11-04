@@ -489,6 +489,116 @@ pub fn key_remote(args: &[String]) -> i32 {
     0
 }
 
+/// `--remote addr out.bmp [op...]`: drive a VNC server directly (no VPN) for
+/// troubleshooting, then save a snapshot. Password from PVNC_VNC_PASS. Ops:
+/// `click:x,y` `dbl:x,y` `right:x,y` `type:text` `key:win+r` `wait:ms`.
+pub fn remote(args: &[String]) -> i32 {
+    let (Some(addr), Some(out)) = (args.first(), args.get(1)) else {
+        println!("usage: --remote addr out.bmp [click:x,y] [dbl:x,y] [right:x,y] [type:text] [key:win+r] [wait:ms]");
+        return 2;
+    };
+    let dir = std::env::temp_dir().join(format!("portlessvnc-remote-{}", std::process::id()));
+    std::env::set_var("PORTLESS_CONFIG_DIR", &dir);
+    let core = match crate::app::Core::new() {
+        Ok(c) => c,
+        Err(e) => {
+            println!("[FAIL] {e:#}");
+            return 1;
+        }
+    };
+    let pass = std::env::var("PVNC_VNC_PASS").unwrap_or_default();
+    let s = Session::start(core.clone(), addr, "", &pass);
+    let t0 = Instant::now();
+    loop {
+        let st = s.state.lock().clone();
+        match st {
+            State::VerifyFingerprint { .. } => s.answer(Answer::Fingerprint(true)),
+            State::Connected if s.updates.load(std::sync::atomic::Ordering::Relaxed) >= 1 => break,
+            State::Closed(m) => {
+                println!("[FAIL] session: {m}");
+                return 1;
+            }
+            State::NeedCredentials { .. } => {
+                println!("[FAIL] password rejected");
+                return 1;
+            }
+            _ => {}
+        }
+        if t0.elapsed() > Duration::from_secs(30) {
+            println!("[FAIL] timeout ({st:?})");
+            return 1;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    println!("[ OK ] connected to {addr} ({})", s.desktop_name.lock());
+    std::thread::sleep(Duration::from_millis(800));
+    let xy = |v: &str| -> Option<(u16, u16)> {
+        let (x, y) = v.split_once(',')?;
+        Some((x.trim().parse().ok()?, y.trim().parse().ok()?))
+    };
+    let click = |x: u16, y: u16, mask: u8| {
+        s.pointer(x, y, 0);
+        std::thread::sleep(Duration::from_millis(80));
+        s.pointer(x, y, mask);
+        std::thread::sleep(Duration::from_millis(60));
+        s.pointer(x, y, 0);
+        std::thread::sleep(Duration::from_millis(80));
+    };
+    for op in &args[2..] {
+        let (kind, val) = op.split_once(':').unwrap_or((op, ""));
+        match kind {
+            "click" | "right" | "dbl" => {
+                let Some((x, y)) = xy(val) else {
+                    println!("[FAIL] bad position: {op}");
+                    continue;
+                };
+                click(x, y, if kind == "right" { 4 } else { 1 });
+                if kind == "dbl" {
+                    click(x, y, 1);
+                }
+            }
+            "type" => {
+                for c in val.chars() {
+                    let keysym = crate::platform::input::char_to_keysym(c);
+                    s.key(true, keysym, 0);
+                    std::thread::sleep(Duration::from_millis(20));
+                    s.key(false, keysym, 0);
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+            }
+            "key" => {
+                let keys: Vec<(u32, u32)> = val
+                    .split('+')
+                    .filter_map(|k| {
+                        Some(match k.to_ascii_lowercase().as_str() {
+                            "win" => crate::keys::WIN,
+                            "ctrl" => crate::keys::CTRL,
+                            "alt" => crate::keys::ALT,
+                            "shift" => crate::keys::SHIFT,
+                            "enter" => (0xff0d, 0x1c),
+                            "esc" => (0xff1b, 0x01),
+                            "tab" => (0xff09, 0x0f),
+                            o if o.chars().count() == 1 => (crate::platform::input::char_to_keysym(o.chars().next()?), 0),
+                            _ => return None,
+                        })
+                    })
+                    .collect();
+                s.key_combo(&keys);
+            }
+            "wait" => std::thread::sleep(Duration::from_millis(val.parse().unwrap_or(500))),
+            _ => println!("[FAIL] unknown op: {op}"),
+        }
+        std::thread::sleep(Duration::from_millis(150));
+    }
+    std::thread::sleep(Duration::from_millis(1500));
+    let r = save_bmp(&s.fb.lock(), out);
+    println!("[{}] snapshot -> {out}", if r.is_ok() { " OK " } else { "FAIL" });
+    s.close();
+    std::thread::sleep(Duration::from_millis(300));
+    let _ = std::fs::remove_dir_all(&dir);
+    0
+}
+
 fn classic_client(encs: &[i32], password: &str) -> anyhow::Result<String> {
     classic_client_at(std::net::SocketAddr::from(([127, 0, 0, 1], BRIDGE.load(std::sync::atomic::Ordering::SeqCst))), encs, password)
 }

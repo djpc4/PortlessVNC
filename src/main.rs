@@ -147,6 +147,9 @@ fn main() {
     if let Some(i) = args.iter().position(|a| a == "--keyremote") {
         std::process::exit(selftest::key_remote(&args[i + 1..]));
     }
+    if let Some(i) = args.iter().position(|a| a == "--remote") {
+        std::process::exit(selftest::remote(&args[i + 1..]));
+    }
     if let Some(i) = args.iter().position(|a| a == "--vpnpair") {
         std::process::exit(selftest::vpn_pair(args.get(i + 1).map(|s| s.as_str()).unwrap_or("")));
     }
