@@ -9,7 +9,7 @@
 
 use crate::app::Core;
 use crate::config::{AudioMode, QualityMode, ScaleMode};
-use crate::keys::{char_keysym, egui_keysym, needs_shift, to_color_image, KEY_COMBOS, SHIFT};
+use crate::keys::{char_keysym, egui_keysym, needs_shift, paint_input_paused, to_color_image, INPUT_RESUME_DELAY, KEY_COMBOS, SHIFT};
 use crate::platform::java;
 use crate::viewer::{Answer, Session, State};
 use eframe::egui::{self, pos2, vec2, Color32, Pos2, Rect, RichText, TextureHandle, TextureOptions, Vec2};
@@ -95,6 +95,8 @@ pub struct RemoteView {
     pub direct: bool,
     pub mode: Mode,
     options_open: bool,
+    /// touches and hardware keys stay here until then
+    input_resume: Instant,
     orientation: u8,
     bar_open: bool,
     bar_rect: Option<Rect>,
@@ -167,6 +169,7 @@ impl RemoteView {
             direct,
             mode: Mode::Mouse,
             options_open: false,
+            input_resume: Instant::now(),
             orientation,
             bar_open: false,
             bar_rect: None,
@@ -330,7 +333,7 @@ impl RemoteView {
     fn on_ui(&self, ctx: &egui::Context, p: Pos2) -> bool {
         let in_rect = |r: Option<Rect>| r.map(|r| r.contains(p)).unwrap_or(false);
         // (an open dropdown also keeps the tap that closes it)
-        ctx.memory(|m| m.any_popup_open()) || in_rect(self.bar_rect) || in_rect(self.keys_rect) || in_rect(self.mouse_rect) || ctx.layer_id_at(p).map(|l| l.order != egui::Order::Background).unwrap_or(false)
+        Instant::now() < self.input_resume || ctx.memory(|m| m.any_popup_open()) || in_rect(self.bar_rect) || in_rect(self.keys_rect) || in_rect(self.mouse_rect) || ctx.layer_id_at(p).map(|l| l.order != egui::Order::Background).unwrap_or(false)
     }
 
     fn touches(&mut self, ctx: &egui::Context, view: Rect, fw: f32, fh: f32) {
@@ -344,6 +347,14 @@ impl RemoteView {
                 egui::TouchPhase::Start => {
                     if self.on_ui(ctx, pos) {
                         self.ui_touches.push(id);
+                        // a tap during the wait restarts it (a debounce)
+                        if Instant::now() < self.input_resume {
+                            self.input_resume = Instant::now() + INPUT_RESUME_DELAY;
+                        }
+                        // a tap beside the open top row closes it
+                        if self.bar_open && !self.bar_rect.is_some_and(|r| r.contains(pos)) && !ctx.memory(|m| m.any_popup_open()) {
+                            self.bar_open = false;
+                        }
                         continue;
                     }
                     self.fingers.insert(id, pos);
@@ -671,6 +682,10 @@ impl RemoteView {
         let (fw, fh) = (w as f32, h as f32);
         self.fb_size = (fw, fh);
         self.ppp = ctx.pixels_per_point();
+        // a menu is open: input stays here until it has been closed for a moment
+        if self.bar_open || self.options_open || ctx.memory(|m| m.any_popup_open()) {
+            self.input_resume = Instant::now() + INPUT_RESUME_DELAY;
+        }
         if !self.centered {
             self.center = pos2(fw / 2.0, fh / 2.0);
             self.cursor = self.center;
@@ -681,6 +696,10 @@ impl RemoteView {
         let scale = self.scale(view, fw, fh);
         let img = Rect::from_min_max(self.to_screen(view, scale, Pos2::ZERO), self.to_screen(view, scale, pos2(fw, fh)));
         ui.painter().image(tex.id(), img, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
+        if Instant::now() < self.input_resume {
+            paint_input_paused(ui.painter(), view.center_top() + vec2(0.0, 40.0));
+            ctx.request_repaint_after(Duration::from_millis(100));
+        }
 
         // the pointer, drawn locally so it never lags
         let at = self.to_screen(view, scale, self.cursor);
@@ -708,7 +727,7 @@ impl RemoteView {
 
     /// A hardware (Bluetooth/USB) keyboard: its keys arrive as egui events.
     fn hardware_keys(&mut self, ctx: &egui::Context) {
-        if ctx.wants_keyboard_input() || self.mode == Mode::View || self.options_open || ctx.memory(|m| m.any_popup_open()) {
+        if ctx.wants_keyboard_input() || self.mode == Mode::View || Instant::now() < self.input_resume {
             return;
         }
         let (events, mods) = ctx.input(|i| (i.events.clone(), i.modifiers));

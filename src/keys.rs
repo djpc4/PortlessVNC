@@ -3,6 +3,18 @@
 
 use eframe::egui::{self, Color32};
 
+/// After a menu closes, mouse and keys stay local until this long has passed with
+/// no further menu use or clicks.
+pub const INPUT_RESUME_DELAY: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// A small note that input is being held back, so the session doesn't look frozen.
+pub fn paint_input_paused(painter: &egui::Painter, top_center: egui::Pos2) {
+    let galley = painter.layout_no_wrap("Input paused".to_string(), egui::FontId::proportional(14.0), Color32::WHITE);
+    let rect = egui::Rect::from_center_size(top_center + egui::vec2(0.0, 28.0), galley.size() + egui::vec2(16.0, 8.0));
+    painter.rect_filled(rect, 6.0, Color32::from_black_alpha(190));
+    painter.galley(rect.min + egui::vec2(8.0, 4.0), galley, Color32::WHITE);
+}
+
 pub fn to_color_image(fb: &crate::rfb::decode::FrameBuffer, x0: usize, y0: usize, x1: usize, y1: usize) -> egui::ColorImage {
     let (w, h) = (x1 - x0, y1 - y0);
     let mut pixels = Vec::with_capacity(w * h);

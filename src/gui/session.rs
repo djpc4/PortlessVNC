@@ -3,7 +3,7 @@
 use crate::app::Core;
 use crate::config::{AudioMode, QualityMode, ScaleMode};
 use crate::viewer::{Answer, Session, State};
-use crate::keys::{egui_keysym, to_color_image, KEY_COMBOS};
+use crate::keys::{egui_keysym, paint_input_paused, to_color_image, INPUT_RESUME_DELAY, KEY_COMBOS};
 use eframe::egui::{self, Color32, RichText, TextureHandle, TextureOptions};
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -36,7 +36,9 @@ pub struct SessionView {
     /// a menu was open this frame / the last one
     menu_open: bool,
     menu_prev: bool,
-    /// a menu or dropdown is open: keys stay here
+    /// mouse and keys stay here until then
+    input_resume: std::time::Instant,
+    /// input is paused: the key-forward thread reads this
     input_paused: Arc<std::sync::atomic::AtomicBool>,
     /// this mouse press began off the remote screen (or closed a menu): the remote
     /// computer never sees it
@@ -91,6 +93,7 @@ impl SessionView {
             cursor_tex: None,
             menu_open: false,
             menu_prev: false,
+            input_resume: std::time::Instant::now(),
             input_paused,
             swallow_press: false,
             buttons: 0,
@@ -484,9 +487,19 @@ impl SessionView {
         };
 
         let focused = ctx.input(|i| i.focused);
-        // a menu or dropdown is open: mouse and keys stay here until it closes
-        let paused = self.menu_open || self.menu_prev || ctx.memory(|m| m.any_popup_open());
+        // a menu or dropdown is open: mouse and keys stay here until it has been
+        // closed for a moment. Clicking during the wait restarts it (a debounce).
+        let now = std::time::Instant::now();
+        let menu = self.menu_open || self.menu_prev || ctx.memory(|m| m.any_popup_open());
+        if menu || (now < self.input_resume && ctx.input(|i| i.pointer.any_down())) {
+            self.input_resume = now + INPUT_RESUME_DELAY;
+        }
+        let paused = now < self.input_resume;
         self.input_paused.store(paused, Ordering::Relaxed);
+        if paused {
+            paint_input_paused(ui.painter(), avail.center_top());
+            ctx.request_repaint_after(std::time::Duration::from_millis(100));
+        }
         if (paused || !focused) && !self.held.lock().is_empty() {
             self.release_keys();
         }
