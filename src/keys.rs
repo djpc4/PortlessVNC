@@ -5,7 +5,7 @@ use eframe::egui::{self, Color32};
 
 /// After a menu closes, mouse and keys stay local until this long has passed with
 /// no further menu use or clicks.
-pub const INPUT_RESUME_DELAY: std::time::Duration = std::time::Duration::from_secs(2);
+pub const INPUT_RESUME_DELAY: std::time::Duration = std::time::Duration::from_millis(500);
 
 /// A small note that input is being held back, so the session doesn't look frozen.
 pub fn paint_input_paused(painter: &egui::Painter, top_center: egui::Pos2) {
