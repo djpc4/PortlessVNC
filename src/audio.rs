@@ -1,4 +1,4 @@
-﻿//! Host -> viewer audio.
+//! Host -> viewer audio.
 //!
 //! Host: system output is captured with WASAPI loopback (via cpal, no driver,
 //! no admin), resampled to 48 kHz stereo and cut into 20 ms frames. Every
@@ -174,8 +174,84 @@ impl AudioHub {
         res
     }
 
+    /// Windows before 10: event-driven loopback capture (all cpal offers) is
+    /// not delivered there, so poll the capture buffer on a timer.
+    #[cfg(windows)]
+    fn run_polled(self: &Arc<Self>) -> anyhow::Result<()> {
+        use windows::Win32::Media::Audio::{eConsole, eRender, IAudioCaptureClient, IAudioClient, IMMDeviceEnumerator, MMDeviceEnumerator, AUDCLNT_BUFFERFLAGS_SILENT, AUDCLNT_SHAREMODE_SHARED, AUDCLNT_STREAMFLAGS_LOOPBACK};
+        use windows::Win32::System::Com::{CoCreateInstance, CoInitializeEx, CoTaskMemFree, CLSCTX_ALL, COINIT_MULTITHREADED};
+        const WAVE_FORMAT_IEEE_FLOAT: u16 = 3;
+        const WAVE_FORMAT_EXTENSIBLE: u16 = 0xFFFE;
+        unsafe {
+            let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+            let devices: IMMDeviceEnumerator = CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)?;
+            let device = devices.GetDefaultAudioEndpoint(eRender, eConsole)?;
+            let client: IAudioClient = device.Activate(CLSCTX_ALL, None)?;
+            let mix = client.GetMixFormat()?;
+            let (channels, rate, bits, tag) = ((*mix).nChannels as usize, (*mix).nSamplesPerSec, (*mix).wBitsPerSample, (*mix).wFormatTag);
+            let is_float = match tag {
+                WAVE_FORMAT_IEEE_FLOAT => true,
+                // the first field of WAVEFORMATEXTENSIBLE's SubFormat GUID is the plain format tag
+                WAVE_FORMAT_EXTENSIBLE => (mix as *const u8).add(24).cast::<u32>().read_unaligned() == WAVE_FORMAT_IEEE_FLOAT as u32,
+                _ => false,
+            };
+            let started = client.Initialize(AUDCLNT_SHAREMODE_SHARED, AUDCLNT_STREAMFLAGS_LOOPBACK, 2_000_000, 0, mix, None);
+            CoTaskMemFree(Some(mix as *const _));
+            started?;
+            anyhow::ensure!(channels > 0 && bits % 8 == 0 && matches!(bits, 16 | 24 | 32), "unsupported mix format: {bits} bits");
+            let capture: IAudioCaptureClient = client.GetService()?;
+            client.Start()?;
+            log::info!("Audio capture: polling loopback, {rate} Hz, {channels} channels, {bits}-bit{}", if is_float { " float" } else { "" });
+            let mut resampler = Resampler::new(rate, RATE);
+            let (mut acc, mut stereo, mut samples) = (Vec::<f32>::with_capacity(FRAME * 4), Vec::<f32>::new(), Vec::<f32>::new());
+            let mut heard = false;
+            let bytes = bits as usize / 8;
+            while self.has_subs() {
+                loop {
+                    if capture.GetNextPacketSize()? == 0 {
+                        break;
+                    }
+                    let (mut data, mut frames, mut flags) = (std::ptr::null_mut(), 0u32, 0u32);
+                    capture.GetBuffer(&mut data, &mut frames, &mut flags, None, None)?;
+                    let count = frames as usize * channels;
+                    samples.clear();
+                    if flags & (AUDCLNT_BUFFERFLAGS_SILENT.0 as u32) != 0 || data.is_null() {
+                        samples.resize(count, 0.0);
+                    } else {
+                        let raw = std::slice::from_raw_parts(data as *const u8, count * bytes);
+                        samples.extend(raw.chunks_exact(bytes).map(|b| match (is_float, bytes) {
+                            (true, 4) => f32::from_le_bytes([b[0], b[1], b[2], b[3]]),
+                            (_, 2) => i16::from_le_bytes([b[0], b[1]]) as f32 / 32768.0,
+                            (_, 3) => (i32::from_le_bytes([0, b[0], b[1], b[2]]) >> 8) as f32 / 8388608.0,
+                            _ => i32::from_le_bytes([b[0], b[1], b[2], b[3]]) as f32 / 2147483648.0,
+                        }));
+                    }
+                    capture.ReleaseBuffer(frames)?;
+                    if !heard && samples.iter().any(|s| s.abs() > 0.0005) {
+                        heard = true;
+                        log::info!("Audio capture: sound is coming through");
+                    }
+                    stereo.clear();
+                    to_stereo(&samples, channels, &mut stereo);
+                    resampler.process(&stereo, &mut acc);
+                    while acc.len() >= FRAME * 2 {
+                        let frame: Vec<f32> = acc.drain(..FRAME * 2).collect();
+                        self.broadcast(Arc::new(frame));
+                    }
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            let _ = client.Stop();
+        }
+        Ok(())
+    }
+
     #[cfg(not(target_os = "linux"))]
     fn run_stream(self: &Arc<Self>) -> anyhow::Result<()> {
+        #[cfg(windows)]
+        if (unsafe { windows::Win32::System::SystemInformation::GetVersion() } & 0xff) < 10 {
+            return self.run_polled();
+        }
         let host = cpal::default_host();
         let dev = host.default_output_device().ok_or_else(|| anyhow::anyhow!("no output device"))?;
         let cfg = dev.default_output_config()?;
