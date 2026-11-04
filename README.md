@@ -8,6 +8,7 @@ rights, nothing to install: one file.
 | Platform | What |
 |----------|------|
 | Windows 10/11 (x64) | Server + viewer, optional background service with tray icon |
+| Windows 7 / 8 / 8.1 (x64) | Same program, built for Windows 7 (`-win7.exe`); draws with OpenGL, captures the screen with GDI |
 | Linux x86_64, X11 (Ubuntu 20.04+ / Debian 11+ / Mint 20+) | Server + viewer, optional root service with tray icon |
 | Android 8+ (arm64) | Viewer only: saved computers grouped by VPN, touch controls |
 
@@ -117,7 +118,7 @@ needs the AppIndicator extension).
   screen and elevated windows (install the service for those).
 * Pasting a very large copied folder blocks Explorer's paste until downloaded.
 * File copy/paste between clipboards is Windows-only; elsewhere use Send files.
-* Windows 7/8 and XP builds are planned; today's Windows build needs 10/11.
+* The main Windows build needs 10/11; use the `-win7.exe` on 7 / 8 / 8.1. An XP (32-bit) build is planned.
 
 ## Command line
 
@@ -140,6 +141,7 @@ All builds run on Windows with a per-user GNU Rust toolchain (no admin):
 | Script | Needs | Output |
 |--------|-------|--------|
 | `build.ps1` | portable WinLibs MinGW (CMake, Ninja) | Windows `.exe` |
+| `build-win7.ps1` | nightly Rust + `rust-src`, WinLibs MinGW (MSVCRT edition) | Windows 7+ `-win7.exe` |
 | `build-linux.ps1` | `cargo-zigbuild` + zig, Debian ALSA/Opus dev libs | Linux binary |
 | `build-android.ps1` | JDK 17, Android SDK (platform 34, build-tools 34), NDK 27 | signed `.apk` |
 
