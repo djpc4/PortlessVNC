@@ -13,7 +13,7 @@ param(
 )
 $exe = $env:PVNC_REMOTE_EXE
 if (-not $exe) { $exe = Join-Path $env:USERPROFILE "toolchains\pvnc-remote\PortlessVNC-remote.exe" }
-$Png = [IO.Path]::GetFullPath((Join-Path (Get-Location) $Png))
+if (-not [IO.Path]::IsPathRooted($Png)) { $Png = Join-Path (Get-Location) $Png }
 $bmp = [IO.Path]::ChangeExtension($Png, ".bmp")
 $log = [IO.Path]::ChangeExtension($Png, ".log")
 $quote = [string][char]34
