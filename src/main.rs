@@ -1,4 +1,4 @@
-﻿//! PortlessVNC - hybrid VNC server + viewer with a built-in userspace
+//! PortlessVNC - hybrid VNC server + viewer with a built-in userspace
 //! OpenVPN client for remote access without port forwarding.
 //!
 //! Command line:
@@ -239,7 +239,7 @@ fn main() {
             options,
             Box::new(move |cc| {
                 instance::set_context(&cc.egui_ctx);
-                let mut a = gui::App::new(cc, core.clone(), host_only || service_config, minimized, service_config);
+                let mut a = gui::App::new(&cc.egui_ctx, core.clone(), host_only || service_config, minimized, service_config);
                 if let Some(addr) = connect {
                     a.connect_to(&addr, "", "");
                 }
@@ -247,11 +247,29 @@ fn main() {
             }),
         )
     };
+    // graphics too old for wgpu and OpenGL 2 (Intel 945...): draw with the CPU
+    #[cfg(windows)]
+    if has("--software-render") || gui::soft::needed() {
+        let core = core.clone();
+        let connect = connect.clone();
+        let make = Box::new(move |ctx: &egui::Context| {
+            instance::set_context(ctx);
+            let mut a = gui::App::new(ctx, core, host_only || service_config, minimized, service_config);
+            if let Some(addr) = connect {
+                a.connect_to(&addr, "", "");
+            }
+            a
+        });
+        if let Err(e) = gui::soft::run(title, make) {
+            gui::show_startup_error(&e);
+        }
+        std::process::exit(0);
+    }
     // wgpu (Direct3D 12 / Vulkan) first; fall back to OpenGL on old or GPU-less machines.
     if let Err(e) = run(eframe::Renderer::Wgpu) {
         log::warn!("wgpu renderer failed ({e}); falling back to OpenGL");
         if let Err(e) = run(eframe::Renderer::Glow) {
-            eprintln!("Could not open a window: {e}");
+            gui::show_startup_error(&format!("{e}"));
         }
     }
     let _ = Arc::strong_count(&core);

@@ -1,6 +1,8 @@
-﻿//! Main window: host panel (addresses, password, viewers) + connect panel.
+//! Main window: host panel (addresses, password, viewers) + connect panel.
 
 mod session;
+#[cfg(windows)]
+pub mod soft;
 
 use crate::app::Core;
 use crate::config::{AudioMode, AuthMode, BookEntry, Config, QualityMode, VpnProfile};
@@ -55,8 +57,8 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(cc: &eframe::CreationContext<'_>, core: Arc<Core>, host_only: bool, minimized: bool, service_config: bool) -> App {
-        crate::util::set_repaint_ctx(cc.egui_ctx.clone());
+    pub fn new(ctx: &egui::Context, core: Arc<Core>, host_only: bool, minimized: bool, service_config: bool) -> App {
+        crate::util::set_repaint_ctx(ctx.clone());
         #[cfg(windows)]
         crate::platform::keyhook::install();
         #[cfg(windows)]
@@ -1308,6 +1310,39 @@ impl App {
             + self.core.sessions.lock().iter().filter(|s| s.native.load(Ordering::Relaxed) && !s.is_closed()).count()
             + self.svc.as_ref().map(|s| s.viewers.iter().filter(|v| v.native).count()).unwrap_or(0);
         let service_running = self.svc.is_some();
+        // one window only: an ordinary floating panel
+        if ctx.embed_viewports() {
+            let mut open = true;
+            let mut copied = None;
+            egui::Window::new("Shared text").open(&mut open).default_size([420.0, 300.0]).show(ctx, |ui| {
+                hub.note_mark_read();
+                let mut text = hub.note_text();
+                if ui.add(egui::TextEdit::multiline(&mut text).desired_width(f32::INFINITY).desired_rows(10).hint_text("Type or paste here - the other side sees it right away.").font(egui::TextStyle::Monospace)).changed() {
+                    if service_running {
+                        crate::servicectl::request_with("note-edit", text.as_bytes());
+                    }
+                    hub.note_local_edit(text.clone());
+                }
+                ui.horizontal(|ui| {
+                    if ui.button("Copy all").clicked() {
+                        copied = Some(text.clone());
+                    }
+                    if ui.button("Clear").clicked() {
+                        if service_running {
+                            crate::servicectl::request_with("note-edit", b"");
+                        }
+                        hub.note_local_edit(String::new());
+                    }
+                });
+            });
+            if !open {
+                hub.note_window.store(false, Ordering::Relaxed);
+            }
+            if let Some(t) = copied {
+                self.copy(ctx, t);
+            }
+            return;
+        }
         let builder = egui::ViewportBuilder::default().with_title("Shared text - PortlessVNC").with_inner_size([460.0, 380.0]).with_min_inner_size([260.0, 180.0]);
         let mut copied = None;
         ctx.show_viewport_immediate(egui::ViewportId::from_hash_of("shared-text"), builder, |ctx, _| {
@@ -1414,8 +1449,9 @@ impl App {
     }
 }
 
-impl eframe::App for App {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+impl App {
+    /// One frame of the whole program (any renderer).
+    pub fn frame(&mut self, ctx: &egui::Context) {
         if self.minimize_once {
             self.minimize_once = false;
             ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
@@ -1448,6 +1484,20 @@ impl eframe::App for App {
         if self.core.vpn.status().state == VpnState::Connected && !self.core.cfg.read().vpn.resume {
             self.core.cfg.write().vpn.resume = true;
             self.core.save_config();
+        }
+
+        // one window only (software rendering): an open session fills it
+        if ctx.embed_viewports() && !self.sessions.is_empty() {
+            self.vpn_prompt_window(ctx);
+            self.shared_text_window(ctx);
+            let core = self.core.clone();
+            let mut last = self.sessions.pop().unwrap();
+            if last.show(ctx, &core) {
+                self.sessions.push(last);
+            }
+            let live: Vec<u64> = self.sessions.iter().map(|s| s.session.id).collect();
+            self.core.sessions.lock().retain(|s| live.contains(&s.id));
+            return;
         }
 
         egui::TopBottomPanel::top("top").show(ctx, |ui| {
@@ -1557,11 +1607,35 @@ impl eframe::App for App {
         self.core.sessions.lock().retain(|s| live.contains(&s.id));
     }
 
-    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+    /// The window is closing: end sessions and connections.
+    pub fn shutdown(&mut self) {
         for s in &self.sessions {
             s.session.close();
         }
         self.core.vpn.disconnect();
         self.core.server.disconnect_all();
+    }
+}
+
+impl eframe::App for App {
+    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.frame(ctx);
+    }
+
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        self.shutdown();
+    }
+}
+
+/// No window could be opened: say so, instead of exiting silently.
+pub fn show_startup_error(detail: &str) {
+    eprintln!("Could not open a window: {detail}");
+    #[cfg(windows)]
+    unsafe {
+        use windows::core::{w, PCWSTR};
+        use windows::Win32::UI::WindowsAndMessaging::{MessageBoxW, MB_ICONERROR, MB_OK};
+        let text = format!("PortlessVNC could not open its window.\n\n{detail}\n\nTry starting it with --software-render, which needs no 3D graphics.\0");
+        let wide: Vec<u16> = text.encode_utf16().collect();
+        MessageBoxW(None, PCWSTR(wide.as_ptr()), w!("PortlessVNC"), MB_OK | MB_ICONERROR);
     }
 }

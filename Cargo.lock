@@ -3258,6 +3258,7 @@ dependencies = [
  "des",
  "dirs",
  "eframe",
+ "egui-winit",
  "env_logger",
  "flate2",
  "hex",
